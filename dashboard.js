@@ -47,6 +47,7 @@
     document.getElementById('open-sheet').addEventListener('click', openSheet);
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
     document.getElementById('save-mb-config').addEventListener('click', saveMetabaseConfig);
+    document.getElementById('test-mb-config').addEventListener('click', testMetabaseConnection);
     document.getElementById('run-sync').addEventListener('click', runSync);
     document.getElementById('csv-upload').addEventListener('click', importFromCsv);
     document.getElementById('approve-high').addEventListener('click', () => bulkSetAction(0.85));
@@ -625,8 +626,18 @@
     openModal('sync-modal');
 
     const picker = document.getElementById('sport-picker');
-    picker.innerHTML = '<span class="muted small">Loading sports from Metabase…</span>';
     document.getElementById('run-sync').disabled = true;
+    const isConfigured = !!(cfg.apiKey || (cfg.username && cfg.password));
+    if (!isConfigured) {
+      picker.innerHTML = '<span class="muted small">Enter credentials and click <strong>Test Connection</strong> or <strong>Save Connection</strong> to load the sports list.</span>';
+      return;
+    }
+    await loadSportsIntoPicker(presetSportId);
+  }
+
+  async function loadSportsIntoPicker(presetSportId) {
+    const picker = document.getElementById('sport-picker');
+    picker.innerHTML = '<span class="muted small">Loading sports from Metabase…</span>';
     try {
       const sports = await Metabase.fetchSports();
       picker.innerHTML = '';
@@ -671,6 +682,23 @@
     Metabase.saveConfig(cfg);
     Metabase.saveSession(null);
     toast('Metabase connection saved.', 'ok');
+    // Now that credentials exist, populate the sport picker.
+    loadSportsIntoPicker();
+  }
+
+  async function testMetabaseConnection() {
+    saveMetabaseConfig();
+    const log = document.getElementById('sync-progress');
+    log.textContent = 'Testing connection…';
+    try {
+      const user = await Metabase.testConnection();
+      const who = user.email || user.common_name || user.first_name || 'unknown user';
+      log.textContent = `OK — connected as ${who}.`;
+      toast(`Connected as ${who}.`, 'ok');
+    } catch (e) {
+      log.textContent = `Connection failed: ${e.message}`;
+      toast('Connection failed: ' + e.message, 'error');
+    }
   }
 
   async function runSync() {

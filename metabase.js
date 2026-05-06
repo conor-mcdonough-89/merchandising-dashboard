@@ -119,6 +119,16 @@ WHERE m.state IN ('available', 'pending')
     if (!loadSession()) await login();
   }
 
+  // Quick connectivity + auth check. Hits /api/user/current.
+  async function testConnection() {
+    const res = await request('/user/current', { method: 'GET' });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Auth check ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+    }
+    return res.json();
+  }
+
   function authHeaders() {
     const cfg = loadConfig() || {};
     if (cfg.apiKey) return { 'X-API-KEY': cfg.apiKey };
@@ -223,6 +233,7 @@ WHERE m.state IN ('available', 'pending')
     saveSession,
     login,
     ensureAuth,
+    testConnection,
     fetchSports,
     fetchModelsForSport,
     SPORTS_SQL,
