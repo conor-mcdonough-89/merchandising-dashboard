@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SidelineSwap — Merch Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Password gate.
+       Default password is `merchteam` — edit DASHBOARD_PASSWORD below to change it.
+       Auth state is held in sessionStorage as `merch-auth='1'`. -->
+  <div id="gate">
+    <div class="gate-card">
+      <h1>SidelineSwap <span style="color: var(--accent);">Merch</span></h1>
+      <p>Catalog cleanup tool for the merch team. Enter the team password to continue.</p>
+      <form id="gate-form">
+        <input type="password" id="gate-pw" placeholder="password" autofocus autocomplete="current-password">
+        <button type="submit" class="primary">Enter</button>
+      </form>
+      <div class="err" id="gate-err"></div>
+    </div>
+  </div>
+
+  <!-- App shell -->
+  <header class="app-header">
+    <div class="brand">SidelineSwap <span class="accent">Merch</span></div>
+    <div id="conn-state" class="muted small"></div>
+    <div class="spacer"></div>
+    <button class="header-action" id="open-sync" title="Sync from Metabase">↻ Sync</button>
+    <button class="header-action" id="open-sheet" title="View in-progress bulk import sheet">
+      Sheet <span class="badge" id="sheet-count">0</span>
+    </button>
+  </header>
+
+  <div class="sport-tabs" id="sport-tabs"></div>
+
+  <main id="main"></main>
+
+  <!-- Sync overlay -->
+  <div class="modal-backdrop hidden" id="sync-modal">
+    <div class="modal" style="max-width: 560px;">
+      <header>
+        <h2>Sync from Metabase</h2>
+        <button class="close" data-close="sync-modal">×</button>
+      </header>
+      <div class="body">
+        <div class="sync-overlay">
+          <h3>Metabase connection</h3>
+          <div class="row">
+            <label for="mb-username">Username</label>
+            <input type="text" id="mb-username" autocomplete="username" placeholder="email">
+          </div>
+          <div class="row">
+            <label for="mb-password">Password</label>
+            <input type="password" id="mb-password" autocomplete="current-password">
+          </div>
+          <div class="row">
+            <label for="mb-apikey">API Key (optional)</label>
+            <input type="password" id="mb-apikey" placeholder="for SSO-only Metabase">
+          </div>
+          <div class="muted small" style="margin-top: 6px;">
+            Either set username + password OR an API key. Credentials live only in your browser's localStorage; the
+            <code>METABASE_URL</code> is configured server-side.
+          </div>
+
+          <h3 style="margin-top: 18px;">Pick a sport to sync</h3>
+          <div class="row-flex" style="gap: 6px; flex-wrap: wrap;" id="sport-picker">
+            <span class="muted small">Loading sports...</span>
+          </div>
+
+          <h3 style="margin-top: 18px;">Or upload a CSV</h3>
+          <div class="row">
+            <label for="csv-input">CSV file</label>
+            <input type="file" id="csv-input" accept=".csv,text/csv">
+          </div>
+          <div class="row">
+            <label for="csv-sport">Assign to sport</label>
+            <select id="csv-sport"><option value="">— select —</option></select>
+          </div>
+          <button id="csv-upload" class="ghost">Import CSV</button>
+
+          <div class="progress" id="sync-progress">Idle.</div>
+        </div>
+      </div>
+      <footer>
+        <button class="ghost" data-close="sync-modal">Close</button>
+        <div class="spacer"></div>
+        <button id="save-mb-config" class="ghost">Save Connection</button>
+        <button id="run-sync" class="primary" disabled>Sync Now</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Proposal review modal -->
+  <div class="modal-backdrop hidden" id="proposal-modal">
+    <div class="modal">
+      <header>
+        <h2 id="proposal-title">Proposals</h2>
+        <button class="close" data-close="proposal-modal">×</button>
+      </header>
+      <div class="body" id="proposal-body"></div>
+      <footer>
+        <button id="approve-high" class="ghost">Approve all ≥ 0.85</button>
+        <button id="reject-selected" class="ghost">Reject Selected</button>
+        <div class="spacer"></div>
+        <span id="proposal-stats" class="muted small"></span>
+        <button id="add-to-sheet" class="primary">Add Approved to Sheet</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Convention modal -->
+  <div class="modal-backdrop hidden" id="convention-modal">
+    <div class="modal" style="max-width: 800px;">
+      <header>
+        <h2 id="convention-title">Naming Conventions</h2>
+        <button class="close" data-close="convention-modal">×</button>
+      </header>
+      <div class="body" id="convention-body" style="padding: 14px 18px;"></div>
+      <footer>
+        <button class="ghost" data-close="convention-modal">Close</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Confirm dialog -->
+  <div class="modal-backdrop hidden" id="confirm-modal">
+    <div class="modal" style="max-width: 420px;">
+      <header><h2 id="confirm-title">Confirm</h2></header>
+      <div class="body" style="padding: 18px;">
+        <div id="confirm-body" class="muted small"></div>
+      </div>
+      <footer>
+        <div class="spacer"></div>
+        <button class="ghost" id="confirm-cancel">Cancel</button>
+        <button class="primary" id="confirm-ok">Confirm</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Sheet side panel -->
+  <aside class="side-panel" id="sheet-panel">
+    <header>
+      <h2>In-Progress Bulk Import</h2>
+      <button class="close" id="close-sheet" style="background:transparent;border:none;color:var(--text-2);font-size:18px;cursor:pointer;">×</button>
+    </header>
+    <div class="body" id="sheet-body"></div>
+    <footer>
+      <button id="clear-sheet" class="danger">Clear Sheet</button>
+      <div class="spacer"></div>
+      <button id="download-csv" class="primary">Download CSV</button>
+    </footer>
+  </aside>
+
+  <!-- Toasts -->
+  <div class="toast-wrap" id="toasts"></div>
+
+  <!-- Vendor: PapaParse for CSV import/export. Pinned to a known good version. -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <!-- App scripts. Order matters. -->
+  <script src="storage.js"></script>
+  <script src="metabase.js"></script>
+  <script src="clustering.js"></script>
+  <script src="proposals.js"></script>
+  <script src="dashboard.js"></script>
+
+  <script>
+    // ---- password gate ----
+    // Default password is `merchteam`. Change it here. The gate is a deterrent,
+    // not a security boundary — the source is visible to anyone with the URL.
+    const DASHBOARD_PASSWORD = 'merchteam';
+
+    (function setupGate() {
+      const gate = document.getElementById('gate');
+      const form = document.getElementById('gate-form');
+      const input = document.getElementById('gate-pw');
+      const err = document.getElementById('gate-err');
+
+      if (sessionStorage.getItem('merch-auth') === '1') {
+        gate.classList.add('hidden');
+        Dashboard.init();
+        return;
+      }
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (input.value === DASHBOARD_PASSWORD) {
+          sessionStorage.setItem('merch-auth', '1');
+          gate.classList.add('hidden');
+          Dashboard.init();
+        } else {
+          err.textContent = 'Wrong password.';
+          input.select();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
