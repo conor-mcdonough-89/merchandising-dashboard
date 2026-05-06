@@ -17,7 +17,7 @@
       <h1>SidelineSwap <span style="color: var(--accent);">Merch</span></h1>
       <p>Catalog cleanup tool for the merch team. Enter the team password to continue.</p>
       <form id="gate-form">
-        <input type="password" id="gate-pw" placeholder="password" autofocus autocomplete="current-password">
+        <input type="password" id="gate-pw" placeholder="password" autofocus autocomplete="off">
         <button type="submit" class="primary">Enter</button>
       </form>
       <div class="err" id="gate-err"></div>
@@ -187,12 +187,13 @@
       }
       form.addEventListener('submit', (e) => {
         e.preventDefault();
-        if (input.value === DASHBOARD_PASSWORD) {
+        const entered = (input.value || '').trim();
+        if (entered === DASHBOARD_PASSWORD) {
           sessionStorage.setItem('merch-auth', '1');
           gate.classList.add('hidden');
           Dashboard.init();
         } else {
-          err.textContent = 'Wrong password.';
+          err.textContent = `Wrong password. (entered ${entered.length} chars, expected ${DASHBOARD_PASSWORD.length})`;
           input.select();
         }
       });
