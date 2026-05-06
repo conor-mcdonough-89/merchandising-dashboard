@@ -181,9 +181,12 @@ WHERE m.state IN ('available', 'pending')
       parameters,
     };
 
+    // /api/dataset/json wants the payload as a single form field `query`.
+    // Sending JSON directly returns 400 ("missing required key, received: nil").
     const res = await request('/api/dataset/json', {
       method: 'POST',
-      body: JSON.stringify(body),
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'query=' + encodeURIComponent(JSON.stringify(body)),
     });
     if (!res.ok) {
       const text = await res.text();
