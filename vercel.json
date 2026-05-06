@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/api/metabase/:path*", "destination": "/api/metabase-proxy?p=:path*" },
+    { "source": "/api/propose/merges", "destination": "/api/propose/merges" },
+    { "source": "/api/propose/renames", "destination": "/api/propose/renames" },
+    { "source": "/api/propose/conventions", "destination": "/api/propose/conventions" }
+  ]
+}

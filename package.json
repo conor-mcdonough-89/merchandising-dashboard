@@ -1,0 +1,14 @@
+{
+  "name": "merchandising-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SidelineSwap multi-sport model merchandising tool",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}
