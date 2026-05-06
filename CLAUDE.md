@@ -268,7 +268,7 @@ the Edge Functions cover. Requires Node ≥18.
 - **Change LLM models.** Edit `api/anthropic.js`. `SONNET_MODEL` and `OPUS_MODEL`
   constants.
 - **Change the password.** Edit `DASHBOARD_PASSWORD` in `index.html`. Default is
-  `merchteam`. The gate is a deterrent, not a security boundary — the source is visible
+  `shippinglogisticsguy`. The gate is a deterrent, not a security boundary — the source is visible
   to anyone with the URL.
 
 ---
@@ -294,7 +294,7 @@ the Edge Functions cover. Requires Node ≥18.
 - **BigQuery dialect.** `INT64` booleans (`= 1` not `= TRUE`). `@param` syntax for
   parameters. Backticked refs `` `rails.models` `` are fine.
 - **Dashboard password is hardcoded** in `index.html` (`DASHBOARD_PASSWORD` constant).
-  Default `merchteam`.
+  Default `shippinglogisticsguy`.
 - **Metabase session and Anthropic API key are in different places.** Metabase auth
   is browser-side (`localStorage` `merch-metabase-session`). The Anthropic API key
   is server-side only — never sent to the browser.
