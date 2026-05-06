@@ -98,7 +98,7 @@ WHERE m.state IN ('available', 'pending')
     if (!cfg.username || !cfg.password) {
       throw new Error('Metabase config missing: set username + password (or apiKey) in the sync overlay.');
     }
-    const res = await fetch(PROXY_BASE + '/session', {
+    const res = await fetch(PROXY_BASE + '/api/session', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: cfg.username, password: cfg.password }),
@@ -119,9 +119,9 @@ WHERE m.state IN ('available', 'pending')
     if (!loadSession()) await login();
   }
 
-  // Quick connectivity + auth check. Hits /api/user/current.
+  // Quick connectivity + auth check. Hits Metabase's /api/user/current.
   async function testConnection() {
-    const res = await request('/user/current', { method: 'GET' });
+    const res = await request('/api/user/current', { method: 'GET' });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Auth check ${res.status}: ${text.slice(0, 200) || res.statusText}`);
@@ -181,7 +181,7 @@ WHERE m.state IN ('available', 'pending')
       parameters,
     };
 
-    const res = await request('/dataset/json', {
+    const res = await request('/api/dataset/json', {
       method: 'POST',
       body: JSON.stringify(body),
     });
