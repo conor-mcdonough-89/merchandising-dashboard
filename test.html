@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Merch Dashboard — smoke tests</title>
+  <style>
+    body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 24px; max-width: 920px; margin: 0 auto; background: #0c0e12; color: #d8dde6; }
+    h1 { font-size: 16px; margin: 0 0 16px; }
+    .case { border-left: 3px solid #2b3039; padding: 6px 12px; margin: 8px 0; }
+    .pass { border-color: #5fa372; }
+    .fail { border-color: #c97c7c; }
+    .label { color: #8b94a3; }
+    pre { margin: 4px 0 0; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>clustering.js smoke tests</h1>
+  <div id="out"></div>
+
+  <script src="clustering.js"></script>
+  <script>
+    const out = document.getElementById('out');
+    const cases = [];
+
+    function assert(label, cond, detail) {
+      cases.push({ label, ok: !!cond, detail });
+    }
+    function approx(label, val, expected, tolerance = 0.05) {
+      const ok = Math.abs(val - expected) <= tolerance;
+      cases.push({ label, ok, detail: `${val.toFixed(3)} ~= ${expected} (±${tolerance})` });
+    }
+
+    // jaroWinkler basics
+    approx("jaroWinkler('CatX2', 'CATX2 Alloy')", Clustering.jaroWinkler('CatX2', 'CATX2 Alloy'), 0.86, 0.10);
+    approx("jaroWinkler('CatX2', 'CATX2 Composite')", Clustering.jaroWinkler('CatX2', 'CATX2 Composite'), 0.78, 0.15);
+    approx("jaroWinkler identical", Clustering.jaroWinkler('Hype Fire', 'Hype Fire'), 1, 0.001);
+    approx("jaroWinkler very different", Clustering.jaroWinkler('Marucci Bat', 'Easton Glove'), 0.5, 0.2);
+
+    // tokenSetOverlap
+    const tso = Clustering.tokenSetOverlap('hype fire arctic flame', 'Hype Fire Composite');
+    assert(`tokenSetOverlap('hype fire arctic flame', 'Hype Fire Composite') = ${tso.toFixed(3)} > 0.3`, tso > 0.3, '');
+    const tsoNone = Clustering.tokenSetOverlap('Marucci CATX', 'Easton Hype Fire');
+    assert(`tokenSetOverlap of disjoint tokens = ${tsoNone.toFixed(3)} = 0`, tsoNone === 0, '');
+
+    // normalize / tokenize
+    assert("normalize strips punctuation", Clustering.normalize('CATX2-Composite!') === 'catx2 composite', '');
+    const toks = Clustering.tokenize('HypeFire2');
+    assert(`tokenize('HypeFire2') splits camelCase: ${JSON.stringify(toks)}`, toks.length === 2 && toks[0] === 'hype' && toks[1] === 'fire2', '');
+
+    // findMergeCandidates
+    const fakeModels = [
+      { id: 1, name: 'CATX Alloy', state: 'available', sold_count: 200, brand_id: 1, category_id: 37 },
+      { id: 2, name: 'CATX Composite', state: 'available', sold_count: 150, brand_id: 1, category_id: 37 },
+      { id: 3, name: 'CatX', state: 'pending', sold_count: 0, brand_id: 1, category_id: 37 },
+      { id: 4, name: 'Cat x 2 usa', state: 'pending', sold_count: 0, brand_id: 1, category_id: 37 },
+      { id: 5, name: 'CATX2 Alloy', state: 'available', sold_count: 1072, brand_id: 1, category_id: 37 },
+      { id: 6, name: 'Easton Hype Fire', state: 'available', sold_count: 800, brand_id: 2, category_id: 37 },
+    ];
+    const clusters = Clustering.findMergeCandidates(fakeModels);
+    assert(`findMergeCandidates returns >= 2 clusters (got ${clusters.length})`, clusters.length >= 2, JSON.stringify(clusters.map(c => c.anchor.name)));
+    const catX2Cluster = clusters.find(c => c.anchor.id === 4);
+    assert("Cat x 2 usa anchor cluster present", !!catX2Cluster, '');
+    if (catX2Cluster) {
+      const hasCatX2Alloy = catX2Cluster.neighbors.some(n => n.id === 5);
+      assert("Cat x 2 usa has CATX2 Alloy as neighbor", hasCatX2Alloy, JSON.stringify(catX2Cluster.neighbors.map(n => n.name)));
+    }
+
+    // selectGoldModels
+    const gold = Clustering.selectGoldModels(fakeModels);
+    assert(`selectGoldModels returns 3 (sold_count >= 20): got ${gold.length}`, gold.length === 3, JSON.stringify(gold.map(g => g.name)));
+
+    // packClusterBatches
+    const big = Array.from({ length: 73 }, (_, i) => ({ anchor: { id: i, name: `m${i}` }, neighbors: [] }));
+    const batched = Clustering.packClusterBatches(big, 25);
+    assert(`packClusterBatches splits 73 by 25 -> 3 batches: got ${batched.length}`, batched.length === 3, '');
+
+    // findRenameCandidates with empty convention
+    const noConvCands = Clustering.findRenameCandidates(fakeModels, null);
+    assert(`findRenameCandidates with no convention returns all models (got ${noConvCands.length})`, noConvCands.length === fakeModels.length, '');
+
+    // findRenameCandidates with a token vocabulary
+    const conv = { examples: ['CATX Alloy', 'CATX Composite', 'CATX2 Alloy'] };
+    const renameCands = Clustering.findRenameCandidates(fakeModels, conv);
+    assert(`findRenameCandidates filters models that share gold tokens (got ${renameCands.length} candidates)`, renameCands.length < fakeModels.length, JSON.stringify(renameCands.map(c => c.name)));
+
+    // Render
+    let pass = 0, fail = 0;
+    for (const c of cases) {
+      const div = document.createElement('div');
+      div.className = 'case ' + (c.ok ? 'pass' : 'fail');
+      div.innerHTML = `<div><span class="label">${c.ok ? 'PASS' : 'FAIL'}</span> ${c.label}</div>` + (c.detail ? `<pre>${c.detail}</pre>` : '');
+      out.appendChild(div);
+      c.ok ? pass++ : fail++;
+    }
+    const summary = document.createElement('h1');
+    summary.textContent = `${pass} passed, ${fail} failed (${cases.length} total)`;
+    out.prepend(summary);
+  </script>
+</body>
+</html>
