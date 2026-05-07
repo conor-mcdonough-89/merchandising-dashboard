@@ -57,9 +57,10 @@
       b.addEventListener('click', () => closeModal(b.getAttribute('data-close')));
     });
     document.getElementById('open-sync').addEventListener('click', () => openSyncModal());
-    document.getElementById('open-sheet').addEventListener('click', openSheet);
+    document.getElementById('open-sheet').addEventListener('click', toggleSheet);
     document.getElementById('open-settings').addEventListener('click', openSettingsModal);
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
+    document.getElementById('push-to-sheets').addEventListener('click', pushSheetToGoogle);
     document.getElementById('save-mb-config').addEventListener('click', saveMetabaseConfig);
     document.getElementById('test-mb-config').addEventListener('click', testMetabaseConnection);
     document.getElementById('run-sync').addEventListener('click', runSync);
@@ -1306,12 +1307,33 @@
 
   // -------- sheet panel --------
 
+  async function toggleSheet() {
+    const panel = document.getElementById('sheet-panel');
+    if (panel.classList.contains('open')) closeSheet();
+    else await openSheet();
+  }
   async function openSheet() {
     document.getElementById('sheet-panel').classList.add('open');
     await refreshSheetPanel();
   }
   function closeSheet() {
     document.getElementById('sheet-panel').classList.remove('open');
+  }
+
+  async function pushSheetToGoogle() {
+    if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) {
+      return toast('Connect Google and create a sheet first (⚙ Settings).', 'error');
+    }
+    const entries = await Storage.listSheetEntries();
+    if (!entries.length) return toast('Sheet is empty.', 'error');
+    const btn = document.getElementById('push-to-sheets');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = `Pushing ${entries.length}…`;
+    const result = await maybeAppendToSheet(entries);
+    btn.disabled = false;
+    btn.textContent = original;
+    notifySheetResult(result, entries.length);
   }
 
   async function refreshSheetCount() {
@@ -1323,6 +1345,9 @@
     const entries = await Storage.listSheetEntries();
     const body = document.getElementById('sheet-body');
     document.getElementById('sheet-count').textContent = entries.length;
+    const pushBtn = document.getElementById('push-to-sheets');
+    const sheetsBound = !!(global.Sheets && Sheets.isConnected() && Sheets.loadBinding());
+    pushBtn.classList.toggle('hidden', !sheetsBound || !entries.length);
     if (!entries.length) {
       body.innerHTML = `<div class="empty-state" style="margin-top:18px;">
         <strong>Sheet is empty.</strong> Approve proposals to add them.
@@ -1533,6 +1558,10 @@
       toast('Create failed: ' + e.message, 'error');
     }
     renderSettingsBody();
+    // Reveal the Push button if the sheet panel is already open and has entries.
+    if (document.getElementById('sheet-panel').classList.contains('open')) {
+      await refreshSheetPanel();
+    }
   }
 
   global.Dashboard = { init };
