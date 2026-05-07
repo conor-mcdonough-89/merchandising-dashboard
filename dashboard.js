@@ -725,6 +725,7 @@
 
     let allProposals = [];
     let allRejections = [];
+    const allFailures = [];
     try {
       for (const g of grouped) {
         const result = await Proposals.proposeMerges({
@@ -737,10 +738,18 @@
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
+        if (result.failedBatches && result.failedBatches.length) {
+          allFailures.push({ brandName: g.brandName, count: result.failedBatches.length, sample: result.failedBatches[0].error });
+        }
       }
     } catch (e) {
       closeModal('proposal-modal');
       return toast('Merge proposal failed: ' + e.message, 'error');
+    }
+
+    if (allFailures.length) {
+      const total = allFailures.reduce((s, f) => s + f.count, 0);
+      toast(`${total} batch(es) failed across ${allFailures.length} brand(s). First error: ${allFailures[0].sample}`, 'error');
     }
 
     _proposalState = {
@@ -770,6 +779,7 @@
     let allProposals = [];
     let allRejections = [];
     let missingConvention = [];
+    const allFailures = [];
     try {
       for (const g of grouped) {
         const conv = await Storage.loadConvention(g.brandId, g.categoryId);
@@ -788,10 +798,18 @@
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
+        if (result.failedBatches && result.failedBatches.length) {
+          allFailures.push({ brandName: g.brandName, count: result.failedBatches.length, sample: result.failedBatches[0].error });
+        }
       }
     } catch (e) {
       closeModal('proposal-modal');
       return toast('Rename proposal failed: ' + e.message, 'error');
+    }
+
+    if (allFailures.length) {
+      const total = allFailures.reduce((s, f) => s + f.count, 0);
+      toast(`${total} batch(es) failed across ${allFailures.length} brand(s). First error: ${allFailures[0].sample}`, 'error');
     }
 
     _proposalState = {
