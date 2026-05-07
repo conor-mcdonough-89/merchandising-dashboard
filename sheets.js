@@ -231,6 +231,27 @@
     return res.json();
   }
 
+  // Overwrite a previously-appended row in place. `range` is the value our
+  // append call returned via updates.updatedRange (e.g. "Sheet1!A4:S4");
+  // `row` is the full 19-column values array.
+  async function updateRow(range, row) {
+    const binding = loadBinding();
+    if (!binding) throw new Error('No sheet bound. Click Create Sheet first.');
+    if (!range) throw new Error('updateRow requires a range');
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google. Connect first.');
+    const res = await fetch('/api/google/sheets-update', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, range, row }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets update ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
   global.Sheets = {
     startAuth,
     disconnect,
@@ -238,5 +259,6 @@
     loadBinding,
     createSheet,
     appendRows,
+    updateRow,
   };
 })(window);

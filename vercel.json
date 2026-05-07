@@ -11,6 +11,7 @@
     { "source": "/api/google/auth-callback", "destination": "/api/google/auth-callback" },
     { "source": "/api/google/sheets-create", "destination": "/api/google/sheets-create" },
     { "source": "/api/google/sheets-append", "destination": "/api/google/sheets-append" },
+    { "source": "/api/google/sheets-update", "destination": "/api/google/sheets-update" },
     { "source": "/api/conventions/list", "destination": "/api/conventions/list" },
     { "source": "/api/conventions/upsert", "destination": "/api/conventions/upsert" }
   ]

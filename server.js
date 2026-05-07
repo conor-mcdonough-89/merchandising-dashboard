@@ -10,6 +10,7 @@
 //   /api/google/auth-callback      -> api/google/auth-callback.js handler
 //   /api/google/sheets-create      -> api/google/sheets-create.js handler
 //   /api/google/sheets-append      -> api/google/sheets-append.js handler
+//   /api/google/sheets-update      -> api/google/sheets-update.js handler
 //   /api/conventions/list          -> api/conventions/list.js handler
 //   /api/conventions/upsert        -> api/conventions/upsert.js handler
 //
@@ -189,6 +190,7 @@ const EDGE_ROUTES = [
   { path: '/api/google/auth-callback',    module: './api/google/auth-callback.js' },
   { path: '/api/google/sheets-create',    module: './api/google/sheets-create.js' },
   { path: '/api/google/sheets-append',    module: './api/google/sheets-append.js' },
+  { path: '/api/google/sheets-update',    module: './api/google/sheets-update.js' },
   { path: '/api/conventions/list',        module: './api/conventions/list.js' },
   { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
 ];

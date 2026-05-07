@@ -37,7 +37,8 @@ to the catalog.
 | `api/google/auth-refresh.js` | Edge Function. POST `{ refresh_token }` → returns a refreshed access token. |
 | `api/google/auth-callback.js` | Edge Function. HTML response that `postMessage`s the auth code back to the opener and closes itself. |
 | `api/google/sheets-create.js` | Edge Function. POST `{ access_token, title, headerRow }` → creates a new spreadsheet, writes the bulk-import header row, returns `{ sheetId, url }`. |
-| `api/google/sheets-append.js` | Edge Function. POST `{ access_token, sheetId, rows }` → appends rows. |
+| `api/google/sheets-append.js` | Edge Function. POST `{ access_token, sheetId, rows }` → appends rows. Returns `updates.updatedRange` so callers can update the same row later. |
+| `api/google/sheets-update.js` | Edge Function. POST `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. Used when a previously-synced model gets a layered action. |
 | `api/conventions/list.js` | Edge Function. GET `?categoryId=37` → returns `{ category, brands }` for that category from Supabase. |
 | `api/conventions/upsert.js` | Edge Function. POST a category or brand convention → upserts into Supabase, returns the written row. |
 | `server.js` | Zero-dep Node fallback for self-hosting. Serves the static SPA and mirrors the Edge Functions. Node ≥18. |
@@ -116,7 +117,9 @@ relatable category. `sportId` is indexed so the sport filter can scope the list.
 }
 ```
 
-**`sheet`** — keyed by `sourceId` — the in-progress bulk-import sheet
+**`sheet`** — keyed by `sourceId` — the in-progress bulk-import sheet.
+`addSheetEntry` is read-modify-write so layered actions (e.g. state change +
+rename) merge into one record per `sourceId`.
 
 ```js
 {
@@ -124,10 +127,12 @@ relatable category. `sportId` is indexed so the sport filter can scope the list.
   sportId: "4000", sportName: "Baseball",
   categoryId: "37", categoryFullName: "Baseball > Bats",
   brandName: "Marucci",
-  mergeTargetId: 26611, mergeTargetName: "CATX2 Alloy",
-  newName: null,                  // for renames
+  mergeTargetId: 26611, mergeTargetName: "CATX2 Alloy",  // present for merges
+  newName: "CATX2 Composite",                            // present for renames
+  newState: "removed",                                   // present for state changes
+  sheetRowRange: "Sheet1!A4:S4",                         // set on first Sheets append
   reasoning: "...",
-  addedAt: "2026-05-07T..."
+  addedAt: "2026-05-07T...", updatedAt: "2026-05-07T..."
 }
 ```
 
@@ -227,17 +232,23 @@ sortable, filterable table. Toolbars stack above:
 - **Filter toolbar.** Brand `<select>` (populated from the synced models), state
   pill group (All / Available / Pending), search input (substring match on
   `m.name`). Filters apply to both the table and the LLM proposal flows.
-- **Mode toolbar.** Three modes:
+- **Mode toolbar.** Four modes:
   - **Browse** (default). Rows are passive.
   - **Merge Mode.** First row click marks the model as the merge **source**
     (green left-border). Second click marks it as the **target** (blue
     left-border). A sticky confirm bar at the bottom shows
     `Merge X → Y` and Approve / Reset. Approving writes a sheet entry +
-    decision and live-appends to the bound Google Sheet (if connected).
-    Selection clears, mode stays on for the next pair.
+    decision and live-syncs to the bound Google Sheet (if connected). The
+    **source disappears from the table** so it can't be re-merged into a
+    different target. Selection clears, mode stays on for the next pair.
   - **Rename Mode.** Click any model name to swap the cell to an inline input.
     Enter saves, Esc cancels. Saving writes a sheet entry + decision and
-    live-appends to Sheets.
+    live-syncs to Sheets.
+  - **State Mode.** Click any row to open a 3-way picker — **Available**,
+    **Pending**, **Removed** — over that row. Selecting one writes a sheet
+    entry with `newState` set and live-syncs. "Merged" is intentionally not
+    an option; that's set implicitly via Merge Mode by populating
+    `merge_target_id`.
 - **LLM action buttons.** *Find Merges*, *Find Renames*, and *Naming
   Conventions* are still here — but they now operate on the **filtered** model
   set, not the entire category. So with a brand filter active, "Find Merges"
@@ -272,15 +283,22 @@ Header row, in this exact order:
 model_id,description,position,primary_image_url,secondary_image_url,state,merge_target_id,category_id,name,brand_id,synonyms,price_retail,gtin,mpn,line,importance,expert_pick,value_guides_start_date,detail_ids
 ```
 
-For v1 only these columns are populated by the dashboard:
+Columns populated by the dashboard today:
 
 - `model_id` — required, the source model being changed
 - `merge_target_id` — set for merges; the target model the source folds into
 - `name` — set for renames; the canonical name the model becomes
+- `state` — set by State Mode; one of `available` / `pending` / `removed`
 
 All other columns left blank. Blanks mean "no change" to the importer. A merge
 supersedes a rename on the same row — the rename is dropped at export and a warning
-toast is shown.
+toast is shown. State and merge can coexist in the row.
+
+Layered actions (e.g. a state change followed by a rename on the same model)
+**dedup into a single row**: `Storage.addSheetEntry` is read-modify-write, so
+each action overwrites only its own field. The `sheet` IndexedDB store is
+keyed by `sourceId`, so there is always one row per model regardless of how
+many actions were taken.
 
 Filename pattern: `merch-update-<sport>-<YYYY-MM-DD>-<HHMMSS>.csv`.
 
@@ -318,7 +336,8 @@ server-side; tokens live in browser localStorage.
 | `POST /api/google/auth-refresh` | POST | `{ refresh_token }` → returns refreshed access token. |
 | `GET  /api/google/auth-callback` | GET | Tiny HTML page; reads `code`+`state` from the OAuth redirect, posts back to `window.opener`, closes itself. |
 | `POST /api/google/sheets-create` | POST | `{ access_token, title, headerRow }` → creates a new spreadsheet, writes the header row, returns `{ sheetId, url }`. |
-| `POST /api/google/sheets-append` | POST | `{ access_token, sheetId, rows }` → appends rows. |
+| `POST /api/google/sheets-append` | POST | `{ access_token, sheetId, rows }` → appends rows. Response includes `updates.updatedRange` for in-place updates later. |
+| `POST /api/google/sheets-update` | POST | `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. |
 
 ### Required env vars
 
@@ -462,6 +481,9 @@ the Edge Functions cover. Requires Node ≥18.
   **Approve**. Selection clears and Merge Mode stays on for the next pair.
 - **Manually rename a model.** Switch to **Rename Mode** → click the model name
   → type the new name → press Enter.
+- **Mark a model Removed (or change its state).** Switch to **State Mode** →
+  click any row → pick Available / Pending / Removed in the popover. Stacks
+  with merges and renames on the same model — they all land in one CSV row.
 - **Connect Google Sheets.** Header → **⚙ Settings** → **Connect Google** →
   authorize in the popup. Enter a sheet title (optional) and click **Create
   Sheet**. Approvals after that point append rows live.
@@ -528,10 +550,17 @@ the Edge Functions cover. Requires Node ≥18.
 - **Merges supersede renames.** If both are set on the same `sourceId` at export,
   the rename is dropped from the row and a toast is shown. Same rule applies in
   the Sheets append path (`buildCsvRowFromEntry` is shared).
-- **Sheets append is best-effort and append-only.** A failed append leaves the
-  entry in IndexedDB so CSV export still works. Removing an entry from the
-  in-app sheet panel does **not** delete the row in Google Sheets — clean it
-  up manually if needed.
+- **Sheets sync is best-effort.** First action for a sourceId appends and
+  stashes the resulting A1 range on the IndexedDB entry as `sheetRowRange`;
+  subsequent layered actions on the same model `values.update` that range so
+  the bound Sheet stays one-row-per-model. A failed sync leaves the entry in
+  IndexedDB so CSV export still works. Removing an entry from the in-app
+  sheet panel does **not** delete the row in Google Sheets — clean it up
+  manually if needed.
+- **Merge sources are filtered out of the model table once approved.**
+  `_mergedSourceIds` is rebuilt from the sheet store on category open and
+  on every sheet write. Removing the entry from the sheet panel brings the
+  source back to the table.
 - **Google client_secret is server-only.** The browser only ever sees
   `client_id`. PKCE is used so the auth code is bound to the originating
   session.

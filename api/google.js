@@ -132,6 +132,31 @@ export async function appendValues({ access_token, sheetId, rows }) {
     err.status = res.status;
     throw err;
   }
+  // Returns { spreadsheetId, tableRange?, updates: { updatedRange, updatedRows, ... } }
+  // updates.updatedRange is the per-call range we stash on the IndexedDB entry
+  // so subsequent edits target the same row via updateValues below.
+  return res.json();
+}
+
+// Overwrite a previously-appended row in place. `range` is the A1 range that
+// `appendValues` returned (e.g. "Sheet1!A4:S4"); `row` is the full 19-column
+// values array. valueInputOption=RAW so we don't re-interpret cell contents.
+export async function updateValues({ access_token, sheetId, range, row }) {
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'authorization': `Bearer ${access_token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets update ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 

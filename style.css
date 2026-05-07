@@ -607,6 +607,43 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   border: 1px solid rgba(74, 143, 232, 0.4);
   color: var(--accent2);
 }
+.mode-hint.mode-state {
+  background: rgba(232, 196, 74, 0.06);
+  border: 1px solid rgba(232, 196, 74, 0.4);
+  color: #e8c44a;
+}
+
+.model-table.mode-state tbody tr { cursor: pointer; }
+
+/* State Mode popover -- floating over the row, three options. */
+.state-popover {
+  position: fixed;
+  z-index: 50;
+  min-width: 240px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  font-family: 'DM Mono', monospace;
+}
+.state-popover-title { font-size: 12px; margin-bottom: 4px; }
+.state-popover-current { font-size: 10px; margin-bottom: 8px; }
+.state-popover-actions { display: flex; gap: 6px; }
+.state-popover .state-opt {
+  flex: 1;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text);
+  font-family: 'DM Mono', monospace;
+  cursor: pointer;
+  transition: all .15s;
+}
+.state-popover .state-opt:hover { border-color: var(--accent); color: var(--accent); }
+.state-popover .state-opt.state-removed:hover { border-color: var(--bad, #e8746a); color: #e8746a; }
 
 /* ─── Model table (category panel) ─── */
 .model-table-wrap {

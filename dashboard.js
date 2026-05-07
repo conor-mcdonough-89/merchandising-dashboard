@@ -23,6 +23,11 @@
   let _mode = 'browse'; // 'browse' | 'merge' | 'rename'
   let _mergeSelection = { sourceId: null, targetId: null };
   let _renameEditingId = null; // model id whose name cell is currently being edited
+  // Set of sourceIds that have an approved merge in the sheet store. Models in
+  // this set are filtered out of the model table so the operator can't
+  // accidentally re-merge them. Rebuilt via refreshMergedSourceSet() on every
+  // sheet write and on category open.
+  let _mergedSourceIds = new Set();
 
   const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
@@ -256,6 +261,7 @@
     _mode = 'browse';
     _mergeSelection = { sourceId: null, targetId: null };
     _renameEditingId = null;
+    await refreshMergedSourceSet();
     await renderActive();
   }
 
@@ -266,6 +272,7 @@
     const q = (_filters.search || '').trim().toLowerCase();
     const out = [];
     for (const m of all) {
+      if (_mergedSourceIds.has(m.id)) continue; // already merged; can't be re-merged
       if (_filters.brand !== 'all' && String(m.brand_id) !== String(_filters.brand)) continue;
       if (_filters.state !== 'all' && m.state !== _filters.state) continue;
       if (q && !(m.name || '').toLowerCase().includes(q)) continue;
@@ -323,6 +330,7 @@
           <span class="pill ${_mode === 'browse' ? 'active' : ''}" data-mode="browse">Browse</span>
           <span class="pill ${_mode === 'merge' ? 'active' : ''}" data-mode="merge">Merge Mode</span>
           <span class="pill ${_mode === 'rename' ? 'active' : ''}" data-mode="rename">Rename Mode</span>
+          <span class="pill ${_mode === 'state' ? 'active' : ''}" data-mode="state">State Mode</span>
         </div>
         <div class="spacer"></div>
         <button class="ghost" id="skill-merges">Find Merges</button>
@@ -391,6 +399,7 @@
   function setMode(mode) {
     if (mode === _mode) return;
     if (_mode === 'rename' && _renameEditingId != null) cancelRenameEdit();
+    closeStatePopover();
     _mode = mode;
     _mergeSelection = { sourceId: null, targetId: null };
     renderCategoryPanel(_activeCategory);
@@ -405,6 +414,9 @@
     } else if (_mode === 'rename') {
       el.innerHTML = `<strong>Rename Mode.</strong> Click any model name to edit it inline. Enter to save, Esc to cancel.`;
       el.className = 'mode-hint mode-rename';
+    } else if (_mode === 'state') {
+      el.innerHTML = `<strong>State Mode.</strong> Click any row to set the model's state to Available, Pending, or Removed. (Merged is set via Merge Mode.)`;
+      el.className = 'mode-hint mode-state';
     } else {
       el.innerHTML = '';
       el.className = 'mode-hint';
@@ -502,6 +514,12 @@
       startRenameEdit(modelId);
       return;
     }
+    if (_mode === 'state') {
+      // Anchor the popover over the row (or the state cell, whichever is in the event path).
+      const anchor = e.currentTarget || e.target.closest('tr');
+      openStatePopover(modelId, anchor);
+      return;
+    }
     // Browse mode: rows are passive.
   }
 
@@ -565,6 +583,8 @@
 
   async function approveManualMerge(source, target) {
     const cat = _activeCategory;
+    // Only set the action fields we're actually changing -- nulls would
+    // clear unrelated layered actions on the same sourceId.
     const entry = {
       sourceId: source.id,
       sourceName: source.name,
@@ -575,7 +595,6 @@
       brandName: source.brand_name || '',
       mergeTargetId: target.id,
       mergeTargetName: target.name,
-      newName: null,
       reasoning: 'Manual merge (operator)',
     };
     try {
@@ -590,10 +609,10 @@
     } catch (e) {
       return toast('Failed to save: ' + e.message, 'error');
     }
-    const sheetResult = await maybeAppendToSheet([entry]);
-    notifySheetResult(sheetResult, 1);
+    await syncEntryToSheet(source.id);
     _mergeSelection = { sourceId: null, targetId: null };
     await refreshSheetCount();
+    await refreshMergedSourceSet();
     renderModelTable();
     renderMergeConfirmBar();
   }
@@ -655,8 +674,6 @@
       categoryId: cat.id,
       categoryFullName: cat.fullName || cat.name,
       brandName: m.brand_name || '',
-      mergeTargetId: null,
-      mergeTargetName: null,
       newName: value,
       reasoning: 'Manual rename (operator)',
     };
@@ -673,9 +690,105 @@
       toast('Failed to save: ' + e.message, 'error');
       return cancelRenameEdit();
     }
-    const sheetResult = await maybeAppendToSheet([entry]);
-    notifySheetResult(sheetResult, 1);
+    await syncEntryToSheet(m.id);
     _renameEditingId = null;
+    await refreshSheetCount();
+    renderModelTable();
+  }
+
+  // -------- State Mode --------
+
+  const STATE_OPTIONS = [
+    { value: 'available', label: 'Available' },
+    { value: 'pending',   label: 'Pending' },
+    { value: 'removed',   label: 'Removed' },
+  ];
+
+  function closeStatePopover() {
+    const el = document.getElementById('state-popover');
+    if (el) el.remove();
+    document.removeEventListener('click', _statePopoverDismiss, true);
+    document.removeEventListener('keydown', _statePopoverKeydown, true);
+  }
+
+  function _statePopoverDismiss(e) {
+    const pop = document.getElementById('state-popover');
+    if (!pop) return;
+    if (pop.contains(e.target)) return;
+    // Don't dismiss when the click was on the same row (which re-opens it).
+    closeStatePopover();
+  }
+
+  function _statePopoverKeydown(e) {
+    if (e.key === 'Escape') closeStatePopover();
+  }
+
+  function openStatePopover(modelId, anchorRow) {
+    closeStatePopover();
+    const m = (_activeCategory.models || []).find((x) => x.id === modelId);
+    if (!m || !anchorRow) return;
+    const existing = null; // we don't pre-load the entry; latest write wins
+    const pop = document.createElement('div');
+    pop.id = 'state-popover';
+    pop.className = 'state-popover';
+    pop.innerHTML = `
+      <div class="state-popover-title">${escapeHtml(m.name)} <span class="muted small">#${m.id}</span></div>
+      <div class="state-popover-current muted small">Currently: <strong>${escapeHtml(m.state || 'unknown')}</strong></div>
+      <div class="state-popover-actions">
+        ${STATE_OPTIONS.map((o) => `<button class="state-opt state-${o.value}" data-state="${o.value}">${o.label}</button>`).join('')}
+      </div>
+    `;
+    document.body.appendChild(pop);
+    // Position the popover beneath the row.
+    const rect = anchorRow.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.top = `${rect.bottom + 6}px`;
+    pop.style.left = `${Math.min(rect.left + 24, window.innerWidth - pop.offsetWidth - 16)}px`;
+
+    pop.querySelectorAll('.state-opt').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const newState = btn.getAttribute('data-state');
+        closeStatePopover();
+        await applyManualStateChange(m, newState);
+      });
+    });
+
+    // Defer the document-level dismiss listener by one tick so it doesn't
+    // immediately fire on the click that opened the popover.
+    setTimeout(() => {
+      document.addEventListener('click', _statePopoverDismiss, true);
+      document.addEventListener('keydown', _statePopoverKeydown, true);
+    }, 0);
+  }
+
+  async function applyManualStateChange(model, newState) {
+    const cat = _activeCategory;
+    if (!cat) return;
+    const entry = {
+      sourceId: model.id,
+      sourceName: model.name,
+      sportId: cat.sportId || null,
+      sportName: cat.sportName || sportNameFor(cat.sportId) || '',
+      categoryId: cat.id,
+      categoryFullName: cat.fullName || cat.name,
+      brandName: model.brand_name || '',
+      newState,
+      reasoning: 'Manual state change (operator)',
+    };
+    try {
+      await Storage.addSheetEntry(entry);
+      await Storage.recordDecision({
+        sourceId: model.id,
+        targetId: null,
+        newName: null,
+        decision: 'approved',
+        reasoning: entry.reasoning,
+      });
+    } catch (e) {
+      return toast('Failed to save: ' + e.message, 'error');
+    }
+    await syncEntryToSheet(model.id);
     await refreshSheetCount();
     renderModelTable();
   }
@@ -685,7 +798,10 @@
   function buildCsvRowFromEntry(e) {
     const row = Object.fromEntries(BULK_IMPORT_HEADERS.map((h) => [h, '']));
     row.model_id = e.sourceId;
-    // Merges supersede renames: drop the rename if both are set.
+    if (e.newState) row.state = e.newState;
+    // Merges supersede renames: drop the rename if both are set on the same row.
+    // The hide-after-merge filter prevents this in the manual flow, but a stale
+    // entry from before the filter still gets normalized here.
     if (e.mergeTargetId) {
       row.merge_target_id = e.mergeTargetId;
     } else if (e.newName) {
@@ -699,24 +815,32 @@
     return BULK_IMPORT_HEADERS.map((h) => r[h] ?? '');
   }
 
-  // Returns { skipped: true } | { ok: true } | { error: string }
-  async function maybeAppendToSheet(entries) {
-    if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) {
-      return { skipped: true };
-    }
-    if (!entries || !entries.length) return { skipped: true };
-    const rows = entries.map(buildCsvValuesFromEntry);
+  // Sync a single sheet entry (by sourceId) to the bound Google Sheet.
+  // - First time: append, capture the returned A1 range, persist it back.
+  // - Subsequent times: update the captured range in place.
+  // No-op when Sheets isn't connected. Surfaces a toast on failure but
+  // leaves the IndexedDB entry intact so CSV export still picks it up.
+  async function syncEntryToSheet(sourceId) {
+    if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) return { skipped: true };
+    const entry = await Storage.loadSheetEntry(sourceId);
+    if (!entry) return { skipped: true };
+    const row = buildCsvValuesFromEntry(entry);
     try {
-      await Sheets.appendRows(rows);
+      if (entry.sheetRowRange) {
+        await Sheets.updateRow(entry.sheetRowRange, row);
+      } else {
+        const result = await Sheets.appendRows([row]);
+        const range = result && result.updates && result.updates.updatedRange;
+        if (range) {
+          await Storage.addSheetEntry({ sourceId, sheetRowRange: range });
+        }
+      }
+      toast(`Synced row to the bound Google Sheet.`, 'ok');
       return { ok: true };
     } catch (e) {
+      toast(`Saved locally; Sheets sync failed: ${e.message}`, 'error');
       return { error: e.message };
     }
-  }
-
-  function notifySheetResult(result, count) {
-    if (result.ok) toast(`Added ${count} row(s) to the bound Google Sheet.`, 'ok');
-    else if (result.error) toast(`Saved locally; Sheets append failed: ${result.error}`, 'error');
   }
 
   // -------- skill: find merges --------
@@ -1307,7 +1431,7 @@
     const approved = _proposalState.items.filter((i) => i.action === 'approve');
     const rejected = _proposalState.items.filter((i) => i.action === 'reject');
 
-    const approvedEntries = [];
+    const approvedSourceIds = [];
     for (const it of approved) {
       const entry = {
         sourceId: it.source_id,
@@ -1317,9 +1441,9 @@
         categoryId: _proposalState.categoryId,
         categoryFullName: _proposalState.categoryFullName,
         brandName: it.brandName || '',
-        mergeTargetId: isMerge ? it.target_id : null,
-        mergeTargetName: isMerge ? it.target_name : null,
-        newName: !isMerge ? it.new_name : null,
+        ...(isMerge
+          ? { mergeTargetId: it.target_id, mergeTargetName: it.target_name }
+          : { newName: it.new_name }),
         reasoning: it.reasoning || '',
       };
       await Storage.addSheetEntry(entry);
@@ -1330,7 +1454,7 @@
         decision: 'approved',
         reasoning: it.reasoning,
       });
-      approvedEntries.push(entry);
+      approvedSourceIds.push(it.source_id);
     }
     for (const it of rejected) {
       await Storage.recordDecision({
@@ -1343,11 +1467,10 @@
     }
     closeModal('proposal-modal');
     await refreshSheetCount();
+    await refreshMergedSourceSet();
+    if (_activeCategory) renderModelTable();
     toast(`Added ${approved.length} to sheet, recorded ${rejected.length} rejections.`, 'ok');
-    if (approvedEntries.length) {
-      const sheetResult = await maybeAppendToSheet(approvedEntries);
-      notifySheetResult(sheetResult, approvedEntries.length);
-    }
+    for (const id of approvedSourceIds) await syncEntryToSheet(id);
   }
 
   // -------- sync overlay --------
@@ -1624,16 +1747,31 @@
     const btn = document.getElementById('push-to-sheets');
     const original = btn.textContent;
     btn.disabled = true;
-    btn.textContent = `Pushing ${entries.length}…`;
-    const result = await maybeAppendToSheet(entries);
+    let ok = 0;
+    let failed = 0;
+    for (let i = 0; i < entries.length; i++) {
+      btn.textContent = `Pushing ${i + 1}/${entries.length}…`;
+      const r = await syncEntryToSheet(entries[i].sourceId);
+      if (r.ok) ok++;
+      else if (r.error) failed++;
+    }
     btn.disabled = false;
     btn.textContent = original;
-    notifySheetResult(result, entries.length);
+    if (failed) toast(`Pushed ${ok}; ${failed} failed.`, 'error');
+    else toast(`Pushed ${ok} row(s) to the bound Sheet.`, 'ok');
   }
 
   async function refreshSheetCount() {
     const entries = await Storage.listSheetEntries();
     document.getElementById('sheet-count').textContent = entries.length;
+  }
+
+  // Rebuild the in-memory set of sourceIds that have an approved merge in the
+  // sheet store. Called on category open and after every sheet write. Cheap:
+  // one IndexedDB read per call; the sheet stays small in practice.
+  async function refreshMergedSourceSet() {
+    const entries = await Storage.listSheetEntries();
+    _mergedSourceIds = new Set(entries.filter((e) => e.mergeTargetId).map((e) => e.sourceId));
   }
 
   async function refreshSheetPanel() {
@@ -1662,22 +1800,23 @@
       for (const e of list) {
         const row = document.createElement('div');
         row.className = 'sheet-row';
-        if (e.mergeTargetId) {
-          row.innerHTML = `
-            <div class="name"><strong>${escapeHtml(e.sourceName)}</strong> <span class="muted small">#${e.sourceId}</span><div class="muted small">→ merge into <strong>${escapeHtml(e.mergeTargetName || '')}</strong> #${e.mergeTargetId}</div></div>
-            <span class="remove" data-id="${e.sourceId}" title="Remove">×</span>`;
-        } else if (e.newName) {
-          row.innerHTML = `
-            <div class="name"><strong>${escapeHtml(e.sourceName)}</strong> <span class="muted small">#${e.sourceId}</span><div class="muted small">→ rename to <strong>${escapeHtml(e.newName)}</strong></div></div>
-            <span class="remove" data-id="${e.sourceId}" title="Remove">×</span>`;
-        } else {
-          row.innerHTML = `
-            <div class="name"><strong>${escapeHtml(e.sourceName)}</strong></div>
-            <span class="remove" data-id="${e.sourceId}" title="Remove">×</span>`;
+        const actions = [];
+        if (e.newState) {
+          actions.push(`<div class="muted small">→ state: <strong>${escapeHtml(e.newState)}</strong></div>`);
         }
+        if (e.mergeTargetId) {
+          actions.push(`<div class="muted small">→ merge into <strong>${escapeHtml(e.mergeTargetName || '')}</strong> #${e.mergeTargetId}</div>`);
+        } else if (e.newName) {
+          actions.push(`<div class="muted small">→ rename to <strong>${escapeHtml(e.newName)}</strong></div>`);
+        }
+        row.innerHTML = `
+          <div class="name"><strong>${escapeHtml(e.sourceName)}</strong> <span class="muted small">#${e.sourceId}</span>${actions.join('')}</div>
+          <span class="remove" data-id="${e.sourceId}" title="Remove">×</span>`;
         row.querySelector('.remove').addEventListener('click', async () => {
           await Storage.removeSheetEntry(e.sourceId);
           await refreshSheetPanel();
+          await refreshMergedSourceSet();
+          if (_activeCategory) renderModelTable();
         });
         div.appendChild(row);
       }
@@ -1689,6 +1828,8 @@
     showConfirm('Clear sheet?', 'This removes all approved proposals from the in-progress sheet. Approval/rejection history in IndexedDB is preserved.', async () => {
       await Storage.clearSheet();
       await refreshSheetPanel();
+      await refreshMergedSourceSet();
+      if (_activeCategory) renderModelTable();
       toast('Sheet cleared.', 'ok');
     });
   }
