@@ -1,14 +1,15 @@
 // storage.js — IndexedDB persistence for the merch dashboard.
 // Database name: `merch-dashboard`
-// Stores: sports, conventions, decisions, sheet
-// Public API: openDB, saveSport, loadSport, listSports, deleteSport,
+// Stores: categories, conventions, decisions, sheet
+// Public API: openDB, saveCategory, loadCategory, listCategories,
+//             deleteCategory,
 //             saveConvention, loadConvention, listConventions,
 //             recordDecision, getRejections, clearExpiredDecisions,
 //             addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const REJECTION_TTL_DAYS = 30;
 
   let _dbPromise = null;
@@ -19,8 +20,14 @@
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = (event) => {
         const db = req.result;
-        if (!db.objectStoreNames.contains('sports')) {
-          db.createObjectStore('sports', { keyPath: 'id' });
+        // v1 -> v2: data model shifted from sport-rooted to relatable-category-rooted.
+        // The legacy `sports` store is dropped; users re-sync per category.
+        if (db.objectStoreNames.contains('sports')) {
+          db.deleteObjectStore('sports');
+        }
+        if (!db.objectStoreNames.contains('categories')) {
+          const s = db.createObjectStore('categories', { keyPath: 'id' });
+          s.createIndex('sportId', 'sportId', { unique: false });
         }
         if (!db.objectStoreNames.contains('conventions')) {
           const s = db.createObjectStore('conventions', { keyPath: 'key' });
@@ -54,22 +61,34 @@
     });
   }
 
-  // -------- sports --------
-  async function saveSport(record) {
-    const store = await tx('sports', 'readwrite');
-    return promisify(store.put(record));
+  // -------- categories (relatable: leaf categories with has_models=1) --------
+  // Record shape:
+  // {
+  //   id: "37" (string),
+  //   name: "Bats",
+  //   fullName: "Baseball > Bats",
+  //   path: "4000/37",
+  //   sportId: "4000", sportName: "Baseball",
+  //   models: [...],            // present once synced
+  //   syncedAt: "2026-05-07T..." // present once synced
+  // }
+  async function saveCategory(record) {
+    const store = await tx('categories', 'readwrite');
+    const normalized = { ...record, id: String(record.id) };
+    return promisify(store.put(normalized));
   }
-  async function loadSport(sportId) {
-    const store = await tx('sports', 'readonly');
-    return promisify(store.get(String(sportId)));
+
+  async function loadCategory(categoryId) {
+    const store = await tx('categories', 'readonly');
+    return promisify(store.get(String(categoryId)));
   }
-  async function listSports() {
-    const store = await tx('sports', 'readonly');
+  async function listCategories() {
+    const store = await tx('categories', 'readonly');
     return promisify(store.getAll());
   }
-  async function deleteSport(sportId) {
-    const store = await tx('sports', 'readwrite');
-    return promisify(store.delete(String(sportId)));
+  async function deleteCategory(categoryId) {
+    const store = await tx('categories', 'readwrite');
+    return promisify(store.delete(String(categoryId)));
   }
 
   // -------- conventions --------
@@ -158,7 +177,7 @@
 
   global.Storage = {
     openDB,
-    saveSport, loadSport, listSports, deleteSport,
+    saveCategory, loadCategory, listCategories, deleteCategory,
     saveConvention, loadConvention, listConventions, conventionKey,
     recordDecision, getRejections, clearExpiredDecisions,
     addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,

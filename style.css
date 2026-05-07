@@ -100,52 +100,116 @@ a:hover { color: var(--accent); }
   color: var(--muted);
 }
 
-/* ─── Sport tabs (top-level) ─── */
-.sport-tabs {
+/* ─── Sport filter strip (top-level) ─── */
+.sport-filter {
   display: flex;
-  gap: 0;
-  padding: 0 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 28px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   overflow-x: auto;
+  white-space: nowrap;
 }
 
-.sport-tab {
-  padding: 12px 20px;
+.sport-pill {
+  padding: 6px 14px;
+  border-radius: 999px;
   cursor: pointer;
   font-family: 'DM Mono', monospace;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--muted);
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: none;
+  background: var(--surface2);
+  border: 1px solid var(--border);
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  transition: all .2s;
+  transition: all .15s;
   white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
+}
+.sport-pill:hover { color: var(--text); border-color: var(--text); }
+.sport-pill.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ─── Category grid (relatable categories) ─── */
+.cat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 6px;
+}
+.cat-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  cursor: pointer;
+  transition: all .15s;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cat-tile:hover { border-color: var(--accent); transform: translateY(-1px); }
+.cat-tile-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
   gap: 8px;
 }
-.sport-tab:hover { color: var(--text); }
-.sport-tab.active {
+.cat-tile-title {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 18px;
+  letter-spacing: 1.5px;
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  line-height: 1.1;
 }
-.sport-tab .resync {
-  background: none;
-  border: none;
+.cat-tile-resync {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
-  padding: 0 2px;
-  display: inline;
+  padding: 0 4px;
 }
-.sport-tab .resync:hover { color: var(--accent2); }
-.sport-tab.add { color: var(--muted); border-style: dashed; cursor: pointer; }
-.sport-tab.add:hover { color: var(--accent); }
-.sport-tab.empty { color: var(--muted); font-style: italic; cursor: default; }
+.cat-tile-resync:hover { color: var(--accent2); }
+.cat-tile-meta {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+}
+.cat-tile-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.cat-tile-stats > div { text-align: center; }
+.cat-tile-stats .num {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 20px;
+  letter-spacing: 1px;
+  color: var(--text);
+}
+.cat-tile-stats .lbl {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ─── Category picker (inside the sync overlay) ─── */
+.cat-pick {
+  font-size: 11px;
+  padding: 6px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
 
 /* ─── Main content ─── */
 main {

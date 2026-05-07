@@ -1,20 +1,24 @@
 // dashboard.js — all UI rendering for the merch dashboard.
 // Entry point: Dashboard.init() (called from index.html after the password gate).
 //
+// Architecture: relatable (leaf) categories are the primary unit of work --
+// models attach to a leaf category like "Baseball > Bats", not to a sport.
+// Sport is a filter on top of the category list.
+//
 // State kept in module-level variables; persisted state in IndexedDB (Storage)
 // and localStorage. Re-renders are explicit (no framework reactivity).
 
 (function (global) {
   // -------- module state --------
 
-  let _sportsList = [];      // [{id, name, path}]
-  let _activeSportId = null; // sport currently displayed
-  let _activeCategoryId = null;
-  let _activeCategoryName = null;
-  let _proposalState = null; // { kind, brandName, categoryId, items: [...] }
+  let _sportsMeta = [];           // [{id, name}] -- sports that have at least one relatable category
+  let _sportFilter = 'all';       // 'all' or sport id
+  let _activeCategoryId = null;   // id of the relatable category currently open
+  let _proposalState = null;
 
-  const ACTIVE_SPORT_KEY = 'merch-active-sport';
+  const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
+  const SPORTS_META_KEY = 'merch-sports-meta'; // cached sport id->name map
 
   // -------- init --------
 
@@ -22,28 +26,19 @@
     await Storage.openDB();
     await Storage.clearExpiredDecisions();
     bindGlobalHandlers();
-    await refreshSportTabs();
+    loadCachedSportsMeta();
+    _sportFilter = localStorage.getItem(SPORT_FILTER_KEY) || 'all';
+    _activeCategoryId = localStorage.getItem(ACTIVE_CATEGORY_KEY) || null;
+    await renderSportFilter();
     await refreshSheetCount();
-    const savedSport = localStorage.getItem(ACTIVE_SPORT_KEY);
-    const savedCategory = localStorage.getItem(ACTIVE_CATEGORY_KEY);
-    if (savedSport) {
-      _activeSportId = savedSport;
-      if (savedCategory) {
-        const parsed = JSON.parse(savedCategory);
-        _activeCategoryId = parsed.id;
-        _activeCategoryName = parsed.name;
-      }
-      await renderActive();
-    } else {
-      renderEmpty();
-    }
+    await renderActive();
   }
 
   function bindGlobalHandlers() {
     document.querySelectorAll('[data-close]').forEach((b) => {
       b.addEventListener('click', () => closeModal(b.getAttribute('data-close')));
     });
-    document.getElementById('open-sync').addEventListener('click', openSyncModal);
+    document.getElementById('open-sync').addEventListener('click', () => openSyncModal());
     document.getElementById('open-sheet').addEventListener('click', openSheet);
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
     document.getElementById('save-mb-config').addEventListener('click', saveMetabaseConfig);
@@ -55,6 +50,7 @@
     document.getElementById('add-to-sheet').addEventListener('click', addApprovedToSheet);
     document.getElementById('clear-sheet').addEventListener('click', confirmClearSheet);
     document.getElementById('download-csv').addEventListener('click', downloadCsv);
+    document.getElementById('sync-sport-filter').addEventListener('change', () => renderCategoryPicker());
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal']
@@ -64,48 +60,69 @@
     });
   }
 
-  // -------- sport tabs --------
-
-  async function refreshSportTabs() {
-    const synced = await Storage.listSports();
-    _sportsList = synced.map((s) => ({ id: s.id, name: s.name, count: (s.models || []).length, syncedAt: s.syncedAt }));
-    const tabsEl = document.getElementById('sport-tabs');
-    tabsEl.innerHTML = '';
-    if (!synced.length) {
-      const empty = document.createElement('span');
-      empty.className = 'sport-tab empty';
-      empty.textContent = 'No sports synced yet';
-      tabsEl.appendChild(empty);
+  function loadCachedSportsMeta() {
+    try {
+      const raw = localStorage.getItem(SPORTS_META_KEY);
+      _sportsMeta = raw ? JSON.parse(raw) : [];
+    } catch (_) {
+      _sportsMeta = [];
     }
-    for (const s of _sportsList) {
-      const tab = document.createElement('div');
-      tab.className = 'sport-tab' + (s.id === _activeSportId ? ' active' : '');
-      tab.innerHTML = `<span>${escapeHtml(s.name)}</span> <span class="muted small">${s.count.toLocaleString()}</span> <span class="resync" title="Re-sync ${escapeHtml(s.name)}">↻</span>`;
-      tab.addEventListener('click', (e) => {
-        if (e.target.classList.contains('resync')) {
-          e.stopPropagation();
-          openSyncModal(s.id);
-        } else {
-          activateSport(s.id);
-        }
-      });
-      tabsEl.appendChild(tab);
-    }
-    const addBtn = document.createElement('div');
-    addBtn.className = 'sport-tab add';
-    addBtn.textContent = '+ Sync sport';
-    addBtn.addEventListener('click', () => openSyncModal());
-    tabsEl.appendChild(addBtn);
+  }
+  function saveCachedSportsMeta(list) {
+    _sportsMeta = list || [];
+    localStorage.setItem(SPORTS_META_KEY, JSON.stringify(_sportsMeta));
+  }
+  function sportNameFor(sportId) {
+    const m = _sportsMeta.find((s) => String(s.id) === String(sportId));
+    return m ? m.name : null;
   }
 
-  async function activateSport(sportId) {
-    _activeSportId = sportId;
-    _activeCategoryId = null;
-    _activeCategoryName = null;
-    localStorage.setItem(ACTIVE_SPORT_KEY, sportId);
-    localStorage.removeItem(ACTIVE_CATEGORY_KEY);
-    await refreshSportTabs();
-    await renderActive();
+  // -------- sport filter strip --------
+
+  async function renderSportFilter() {
+    const cats = await Storage.listCategories();
+    // Sports we know about: cached metadata + any sport id present on a category
+    // record. Build a unified list keyed by id.
+    const map = new Map();
+    for (const s of _sportsMeta) map.set(String(s.id), { id: String(s.id), name: s.name });
+    for (const c of cats) {
+      if (c.sportId && !map.has(String(c.sportId))) {
+        map.set(String(c.sportId), { id: String(c.sportId), name: c.sportName || `Sport #${c.sportId}` });
+      }
+    }
+    const sports = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+    const el = document.getElementById('sport-filter');
+    el.innerHTML = '';
+    const all = document.createElement('span');
+    all.className = 'sport-pill' + (_sportFilter === 'all' ? ' active' : '');
+    all.textContent = 'All sports';
+    all.addEventListener('click', () => setSportFilter('all'));
+    el.appendChild(all);
+
+    for (const s of sports) {
+      const p = document.createElement('span');
+      p.className = 'sport-pill' + (_sportFilter === s.id ? ' active' : '');
+      p.textContent = s.name;
+      p.addEventListener('click', () => setSportFilter(s.id));
+      el.appendChild(p);
+    }
+
+    if (!sports.length) {
+      const hint = document.createElement('span');
+      hint.className = 'muted small';
+      hint.style.marginLeft = '8px';
+      hint.textContent = 'Sports appear here once you sync a category.';
+      el.appendChild(hint);
+    }
+  }
+
+  async function setSportFilter(value) {
+    _sportFilter = value;
+    if (value === 'all') localStorage.removeItem(SPORT_FILTER_KEY);
+    else localStorage.setItem(SPORT_FILTER_KEY, value);
+    await renderSportFilter();
+    if (!_activeCategoryId) await renderActive();
   }
 
   // -------- main pane --------
@@ -113,105 +130,114 @@
   function renderEmpty() {
     document.getElementById('main').innerHTML = `
       <div class="empty-state">
-        <strong>No sport selected.</strong>
-        Click <em>Sync</em> in the header to pull a sport from Metabase, then pick it from the tab strip above.
+        <strong>No categories synced yet.</strong>
+        Click <em>Sync</em> in the header to pick a relatable category — e.g. Baseball &gt; Bats — and pull its models from Metabase.
       </div>
     `;
   }
 
   async function renderActive() {
-    if (!_activeSportId) return renderEmpty();
-    const sport = await Storage.loadSport(_activeSportId);
-    if (!sport) return renderEmpty();
     if (_activeCategoryId) {
-      renderCategoryPanel(sport);
-    } else {
-      renderSportOverview(sport);
+      const cat = await Storage.loadCategory(_activeCategoryId);
+      if (!cat || !cat.models) {
+        // The active category was deleted or never finished syncing. Bail back to the grid.
+        _activeCategoryId = null;
+        localStorage.removeItem(ACTIVE_CATEGORY_KEY);
+        return renderActive();
+      }
+      renderCategoryPanel(cat);
+      return;
     }
+    await renderCategoryGrid();
   }
 
-  function renderSportOverview(sport) {
-    const main = document.getElementById('main');
-    const models = sport.models || [];
-    const available = models.filter((m) => m.state === 'available').length;
-    const pending = models.filter((m) => m.state === 'pending').length;
+  async function renderCategoryGrid() {
+    const all = await Storage.listCategories();
+    const synced = all.filter((c) => c.models);
+    const filtered = _sportFilter === 'all'
+      ? synced
+      : synced.filter((c) => String(c.sportId) === String(_sportFilter));
 
-    const brandCounts = countBy(models, (m) => m.brand_name || '(unknown)');
-    const categoryCounts = countByCategory(models);
+    const main = document.getElementById('main');
+    if (!filtered.length) {
+      if (synced.length === 0) {
+        renderEmpty();
+        return;
+      }
+      const sportName = sportNameFor(_sportFilter) || 'this sport';
+      main.innerHTML = `
+        <div class="empty-state">
+          <strong>No categories synced for ${escapeHtml(sportName)} yet.</strong>
+          Click <em>Sync</em> in the header to pick one.
+        </div>
+      `;
+      return;
+    }
+
+    filtered.sort((a, b) => (a.fullName || a.name).localeCompare(b.fullName || b.name));
+
+    const tiles = filtered.map((c) => {
+      const total = c.models.length;
+      const available = c.models.filter((m) => m.state === 'available').length;
+      const pending = c.models.filter((m) => m.state === 'pending').length;
+      const sportLabel = c.sportName || sportNameFor(c.sportId) || '';
+      return `
+        <div class="cat-tile" data-cat-id="${escapeAttr(c.id)}">
+          <div class="cat-tile-head">
+            <div class="cat-tile-title">${escapeHtml(c.fullName || c.name)}</div>
+            <span class="cat-tile-resync" title="Re-sync ${escapeHtml(c.fullName || c.name)}">↻</span>
+          </div>
+          <div class="cat-tile-meta muted small">${escapeHtml(sportLabel)} · synced ${formatRelative(c.syncedAt)}</div>
+          <div class="cat-tile-stats">
+            <div><div class="num">${total.toLocaleString()}</div><div class="lbl">Models</div></div>
+            <div><div class="num">${available.toLocaleString()}</div><div class="lbl">Available</div></div>
+            <div><div class="num">${pending.toLocaleString()}</div><div class="lbl">Pending</div></div>
+          </div>
+        </div>
+      `;
+    }).join('');
 
     main.innerHTML = `
-      <div class="crumbs">
-        <span class="crumb">${escapeHtml(sport.name)}</span>
-      </div>
-      <h2 class="page-title">${escapeHtml(sport.name)} overview</h2>
-      <p class="page-sub">Last synced ${formatRelative(sport.syncedAt)}.
-        Pick a category below to start finding merges, renames, or codifying naming conventions.</p>
-
-      <div class="panel-grid">
-        <div class="stat"><div class="label">Total Models</div><div class="value">${models.length.toLocaleString()}</div></div>
-        <div class="stat"><div class="label">Available</div><div class="value">${available.toLocaleString()}</div><div class="meta">customer-visible</div></div>
-        <div class="stat"><div class="label">Pending</div><div class="value">${pending.toLocaleString()}</div><div class="meta">UGC backlog</div></div>
-        <div class="stat"><div class="label">Brands</div><div class="value">${brandCounts.length.toLocaleString()}</div></div>
-      </div>
-
-      <div class="two-col">
-        <div class="card">
-          <h3>Top Brands <span class="muted small">by model count</span></h3>
-          <table class="list">
-            <thead><tr><th>Brand</th><th class="num">Models</th></tr></thead>
-            <tbody>
-              ${brandCounts.slice(0, 10).map((b) => `
-                <tr><td>${escapeHtml(b.key)}</td><td class="num">${b.count.toLocaleString()}</td></tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-        <div class="card">
-          <h3>Top Categories <span class="muted small">drill in to clean up</span></h3>
-          <table class="list">
-            <thead><tr><th>Category</th><th class="num">Models</th></tr></thead>
-            <tbody>
-              ${categoryCounts.slice(0, 10).map((c) => `
-                <tr>
-                  <td><span class="clickable" data-cat-id="${c.id}" data-cat-name="${escapeAttr(c.fullName)}">${escapeHtml(c.fullName)}</span></td>
-                  <td class="num">${c.count.toLocaleString()}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <h2 class="page-title">Relatable categories</h2>
+      <p class="page-sub">Pick a category to start finding merges, renames, or codifying naming conventions.
+        Use the sport filter above to narrow the list.</p>
+      <div class="cat-grid">${tiles}</div>
     `;
-    main.querySelectorAll('[data-cat-id]').forEach((el) => {
-      el.addEventListener('click', () => {
-        const id = Number(el.getAttribute('data-cat-id'));
-        const name = el.getAttribute('data-cat-name');
-        activateCategory(id, name);
+
+    main.querySelectorAll('.cat-tile').forEach((tile) => {
+      const id = tile.getAttribute('data-cat-id');
+      tile.addEventListener('click', (e) => {
+        if (e.target.classList.contains('cat-tile-resync')) {
+          e.stopPropagation();
+          openSyncModal(id);
+        } else {
+          activateCategory(id);
+        }
       });
     });
   }
 
-  async function activateCategory(categoryId, fullName) {
-    _activeCategoryId = categoryId;
-    _activeCategoryName = fullName;
-    localStorage.setItem(ACTIVE_CATEGORY_KEY, JSON.stringify({ id: categoryId, name: fullName }));
+  async function activateCategory(categoryId) {
+    _activeCategoryId = String(categoryId);
+    localStorage.setItem(ACTIVE_CATEGORY_KEY, _activeCategoryId);
     await renderActive();
   }
 
-  function renderCategoryPanel(sport) {
+  function renderCategoryPanel(cat) {
     const main = document.getElementById('main');
-    const models = (sport.models || []).filter((m) => m.category_id === _activeCategoryId);
+    const models = cat.models || [];
     const available = models.filter((m) => m.state === 'available').length;
     const pending = models.filter((m) => m.state === 'pending').length;
+    const sportLabel = cat.sportName || sportNameFor(cat.sportId) || '';
 
     main.innerHTML = `
       <div class="crumbs">
-        <span class="crumb" id="back-to-sport">${escapeHtml(sport.name)}</span>
+        <span class="crumb" id="back-to-grid">${escapeHtml(sportLabel || 'Categories')}</span>
         <span class="sep">›</span>
-        <span>${escapeHtml(_activeCategoryName || '')}</span>
+        <span>${escapeHtml(cat.fullName || cat.name)}</span>
       </div>
-      <h2 class="page-title">${escapeHtml(_activeCategoryName || '')}</h2>
-      <p class="page-sub">${models.length.toLocaleString()} models · ${available.toLocaleString()} available · ${pending.toLocaleString()} pending</p>
+      <h2 class="page-title">${escapeHtml(cat.fullName || cat.name)}</h2>
+      <p class="page-sub">${models.length.toLocaleString()} models · ${available.toLocaleString()} available · ${pending.toLocaleString()} pending · synced ${formatRelative(cat.syncedAt)}</p>
 
       <div class="toggle-row">
         <span>Working on:</span>
@@ -247,9 +273,8 @@
       </div>
     `;
 
-    main.querySelector('#back-to-sport').addEventListener('click', async () => {
+    main.querySelector('#back-to-grid').addEventListener('click', async () => {
       _activeCategoryId = null;
-      _activeCategoryName = null;
       localStorage.removeItem(ACTIVE_CATEGORY_KEY);
       await renderActive();
     });
@@ -261,9 +286,9 @@
       stateToggle.querySelectorAll('.pill').forEach((p) => p.classList.toggle('active', p === t));
     });
 
-    main.querySelector('#skill-merges').addEventListener('click', () => runFindMerges(sport));
-    main.querySelector('#skill-renames').addEventListener('click', () => runFindRenames(sport));
-    main.querySelector('#skill-conventions').addEventListener('click', () => runInspectConventions(sport));
+    main.querySelector('#skill-merges').addEventListener('click', () => runFindMerges(cat));
+    main.querySelector('#skill-renames').addEventListener('click', () => runFindRenames(cat));
+    main.querySelector('#skill-conventions').addEventListener('click', () => runInspectConventions(cat));
   }
 
   function brandRowsForCategory(models) {
@@ -295,18 +320,16 @@
 
   // -------- skill: find merges --------
 
-  async function runFindMerges(sport) {
+  async function runFindMerges(cat) {
     const stateFilter = activeStateFilter();
-    const models = (sport.models || []).filter((m) => m.category_id === _activeCategoryId);
+    const models = cat.models || [];
     if (!models.length) return toast('No models in this category.', 'error');
 
-    // Group by brand and run per-brand to keep clusters tight.
     const grouped = Proposals.groupByBrandCategory(models);
     openProposalModal('Finding merges...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Clustering ${models.length.toLocaleString()} models across ${grouped.length} brands...</div>`);
 
     let allProposals = [];
     let allRejections = [];
-    let totalBatches = 0;
     try {
       for (const g of grouped) {
         const filtered = g.models.filter((m) => m.state === stateFilter || m.state === 'available');
@@ -320,7 +343,6 @@
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
-        totalBatches += result.batches;
       }
     } catch (e) {
       closeModal('proposal-modal');
@@ -329,10 +351,10 @@
 
     _proposalState = {
       kind: 'merges',
-      sportId: _activeSportId,
-      sportName: sport.name,
-      categoryId: _activeCategoryId,
-      categoryFullName: _activeCategoryName,
+      categoryId: cat.id,
+      categoryFullName: cat.fullName || cat.name,
+      sportId: cat.sportId,
+      sportName: cat.sportName || sportNameFor(cat.sportId) || '',
       items: allProposals.map((p) => ({
         ...p,
         action: p.confidence >= 0.85 ? 'approve' : null,
@@ -344,9 +366,9 @@
 
   // -------- skill: find renames --------
 
-  async function runFindRenames(sport) {
+  async function runFindRenames(cat) {
     const stateFilter = activeStateFilter();
-    const models = (sport.models || []).filter((m) => m.category_id === _activeCategoryId);
+    const models = cat.models || [];
     if (!models.length) return toast('No models in this category.', 'error');
 
     const grouped = Proposals.groupByBrandCategory(models);
@@ -382,10 +404,10 @@
 
     _proposalState = {
       kind: 'renames',
-      sportId: _activeSportId,
-      sportName: sport.name,
-      categoryId: _activeCategoryId,
-      categoryFullName: _activeCategoryName,
+      categoryId: cat.id,
+      categoryFullName: cat.fullName || cat.name,
+      sportId: cat.sportId,
+      sportName: cat.sportName || sportNameFor(cat.sportId) || '',
       items: allProposals.map((p) => ({
         ...p,
         action: p.confidence >= 0.85 ? 'approve' : null,
@@ -398,12 +420,12 @@
 
   // -------- skill: inspect conventions --------
 
-  async function runInspectConventions(sport) {
-    const models = (sport.models || []).filter((m) => m.category_id === _activeCategoryId);
+  async function runInspectConventions(cat) {
+    const models = cat.models || [];
     const grouped = Proposals.groupByBrandCategory(models);
     openModal('convention-modal');
     const body = document.getElementById('convention-body');
-    document.getElementById('convention-title').textContent = `Naming Conventions — ${_activeCategoryName}`;
+    document.getElementById('convention-title').textContent = `Naming Conventions — ${cat.fullName || cat.name}`;
 
     body.innerHTML = `<p class="muted small">Pick a brand to infer or refresh its naming convention. Saved conventions power Find Renames.</p>` +
       grouped.map((g) => `
@@ -416,7 +438,6 @@
         </div>
       `).join('');
 
-    // Hydrate saved conventions
     for (const g of grouped) {
       const card = body.querySelector(`[data-brand-id="${g.brandId}"]`);
       const content = card.querySelector('.convention-content');
@@ -586,6 +607,7 @@
         sourceName: it.source_name,
         sportId: _proposalState.sportId,
         sportName: _proposalState.sportName,
+        categoryId: _proposalState.categoryId,
         categoryFullName: _proposalState.categoryFullName,
         brandName: it.brandName || '',
         mergeTargetId: isMerge ? it.target_id : null,
@@ -617,59 +639,126 @@
 
   // -------- sync overlay --------
 
-  async function openSyncModal(presetSportId) {
+  // Categories list shown in the picker. Loaded from Metabase the first time
+  // credentials are configured; cached on each subsequent open until refreshed.
+  let _pickerCategories = [];
+  let _pickerSelectedId = null;
+
+  async function openSyncModal(presetCategoryId) {
     const cfg = Metabase.loadConfig() || {};
     document.getElementById('mb-username').value = cfg.username || '';
     document.getElementById('mb-password').value = cfg.password || '';
     document.getElementById('mb-apikey').value = cfg.apiKey || '';
     document.getElementById('sync-progress').textContent = 'Idle.';
+    document.getElementById('run-sync').disabled = true;
+    _pickerSelectedId = presetCategoryId ? String(presetCategoryId) : null;
     openModal('sync-modal');
 
-    const picker = document.getElementById('sport-picker');
-    document.getElementById('run-sync').disabled = true;
     const isConfigured = !!(cfg.apiKey || (cfg.username && cfg.password));
+    const picker = document.getElementById('category-picker');
     if (!isConfigured) {
-      picker.innerHTML = '<span class="muted small">Enter credentials and click <strong>Test Connection</strong> or <strong>Save Connection</strong> to load the sports list.</span>';
+      picker.innerHTML = '<span class="muted small">Enter credentials and click <strong>Test Connection</strong> or <strong>Save Connection</strong> to load the category list.</span>';
       return;
     }
-    await loadSportsIntoPicker(presetSportId);
+    await loadCategoriesIntoPicker();
   }
 
-  async function loadSportsIntoPicker(presetSportId) {
-    const picker = document.getElementById('sport-picker');
-    picker.innerHTML = '<span class="muted small">Loading sports from Metabase…</span>';
+  async function loadCategoriesIntoPicker() {
+    const picker = document.getElementById('category-picker');
+    picker.innerHTML = '<span class="muted small">Loading categories from Metabase…</span>';
     try {
-      const sports = await Metabase.fetchSports();
-      picker.innerHTML = '';
-      const csvSelect = document.getElementById('csv-sport');
-      csvSelect.innerHTML = '<option value="">— select —</option>';
+      const [sports, categories] = await Promise.all([
+        Metabase.fetchSports(),
+        Metabase.fetchRelatableCategories(),
+      ]);
+      saveCachedSportsMeta(sports.map((s) => ({ id: String(s.id), name: s.name })));
+
+      // Enrich with sportName, persist metadata so the main UI can show
+      // unsynced categories too if we ever want that. For now we just keep
+      // them in memory for the picker.
+      const sportNameById = new Map(sports.map((s) => [String(s.id), s.name]));
+      _pickerCategories = categories.map((c) => ({
+        ...c,
+        sportName: sportNameById.get(String(c.sportId)) || null,
+      }));
+
+      // Populate sport filter dropdown
+      const sel = document.getElementById('sync-sport-filter');
+      const previous = sel.value;
+      sel.innerHTML = '<option value="">All sports</option>';
       for (const s of sports) {
-        const btn = document.createElement('button');
-        btn.className = 'ghost';
-        btn.textContent = `${s.name} (#${s.id})`;
-        btn.dataset.sportId = s.id;
-        btn.dataset.sportName = s.name;
-        btn.addEventListener('click', () => {
-          picker.querySelectorAll('button').forEach((b) => b.classList.remove('primary'));
-          picker.querySelectorAll('button').forEach((b) => b.classList.add('ghost'));
-          btn.classList.remove('ghost');
-          btn.classList.add('primary');
-          document.getElementById('run-sync').disabled = false;
-          document.getElementById('run-sync').dataset.sportId = s.id;
-          document.getElementById('run-sync').dataset.sportName = s.name;
-          document.getElementById('run-sync').dataset.sportPath = s.path;
-        });
-        picker.appendChild(btn);
-
         const opt = document.createElement('option');
-        opt.value = JSON.stringify({ id: s.id, name: s.name, path: s.path });
+        opt.value = String(s.id);
         opt.textContent = s.name;
-        csvSelect.appendChild(opt);
-
-        if (presetSportId && String(s.id) === String(presetSportId)) btn.click();
+        sel.appendChild(opt);
       }
+      if (previous) sel.value = previous;
+
+      await renderSportFilter();
+      renderCategoryPicker();
     } catch (e) {
-      picker.innerHTML = `<span style="color: var(--bad);">Failed to load sports: ${escapeHtml(e.message)}</span>`;
+      picker.innerHTML = `<span style="color: var(--bad);">Failed to load categories: ${escapeHtml(e.message)}</span>`;
+    }
+  }
+
+  function renderCategoryPicker() {
+    const picker = document.getElementById('category-picker');
+    const filter = document.getElementById('sync-sport-filter').value;
+    const list = filter
+      ? _pickerCategories.filter((c) => String(c.sportId) === String(filter))
+      : _pickerCategories;
+    picker.innerHTML = '';
+    if (!list.length) {
+      picker.innerHTML = '<span class="muted small">No categories match this filter.</span>';
+      document.getElementById('run-sync').disabled = true;
+      return;
+    }
+    for (const c of list) {
+      const btn = document.createElement('button');
+      btn.className = 'ghost cat-pick';
+      btn.textContent = c.fullName || c.name;
+      btn.title = `#${c.id}`;
+      btn.dataset.catId = c.id;
+      btn.dataset.catName = c.name;
+      btn.dataset.catFullName = c.fullName || c.name;
+      btn.dataset.catPath = c.path;
+      btn.dataset.sportId = c.sportId || '';
+      btn.dataset.sportName = c.sportName || '';
+      if (_pickerSelectedId && String(_pickerSelectedId) === String(c.id)) {
+        btn.classList.remove('ghost');
+        btn.classList.add('primary');
+        document.getElementById('run-sync').disabled = false;
+      }
+      btn.addEventListener('click', () => {
+        picker.querySelectorAll('button').forEach((b) => {
+          b.classList.remove('primary'); b.classList.add('ghost');
+        });
+        btn.classList.remove('ghost');
+        btn.classList.add('primary');
+        _pickerSelectedId = c.id;
+        const runBtn = document.getElementById('run-sync');
+        runBtn.disabled = false;
+        runBtn.dataset.catId = c.id;
+        runBtn.dataset.catName = c.name;
+        runBtn.dataset.catFullName = c.fullName || c.name;
+        runBtn.dataset.catPath = c.path;
+        runBtn.dataset.sportId = c.sportId || '';
+        runBtn.dataset.sportName = c.sportName || '';
+      });
+      picker.appendChild(btn);
+    }
+    // If a preset is set, reflect it on the run-sync dataset too
+    if (_pickerSelectedId) {
+      const match = list.find((c) => String(c.id) === String(_pickerSelectedId));
+      if (match) {
+        const runBtn = document.getElementById('run-sync');
+        runBtn.dataset.catId = match.id;
+        runBtn.dataset.catName = match.name;
+        runBtn.dataset.catFullName = match.fullName || match.name;
+        runBtn.dataset.catPath = match.path;
+        runBtn.dataset.sportId = match.sportId || '';
+        runBtn.dataset.sportName = match.sportName || '';
+      }
     }
   }
 
@@ -682,8 +771,7 @@
     Metabase.saveConfig(cfg);
     Metabase.saveSession(null);
     toast('Metabase connection saved.', 'ok');
-    // Now that credentials exist, populate the sport picker.
-    loadSportsIntoPicker();
+    loadCategoriesIntoPicker();
   }
 
   async function testMetabaseConnection() {
@@ -703,33 +791,39 @@
 
   async function runSync() {
     const btn = document.getElementById('run-sync');
-    const sportId = btn.dataset.sportId;
-    const sportName = btn.dataset.sportName;
-    const sportPath = btn.dataset.sportPath;
-    if (!sportId) return toast('Pick a sport first.', 'error');
+    const catId = btn.dataset.catId;
+    const catName = btn.dataset.catName;
+    const catFullName = btn.dataset.catFullName;
+    const catPath = btn.dataset.catPath;
+    const sportId = btn.dataset.sportId || null;
+    const sportName = btn.dataset.sportName || null;
+    if (!catId) return toast('Pick a category first.', 'error');
     saveMetabaseConfig();
 
     const log = (msg) => {
       const el = document.getElementById('sync-progress');
       el.textContent = el.textContent + '\n' + msg;
     };
-    document.getElementById('sync-progress').textContent = `Syncing ${sportName} (#${sportId})…`;
+    document.getElementById('sync-progress').textContent = `Syncing ${catFullName} (#${catId})…`;
     btn.disabled = true;
     try {
-      const models = await Metabase.fetchModelsForSport(sportId);
+      const models = await Metabase.fetchModelsForCategory(catId);
       log(`Fetched ${models.length.toLocaleString()} models.`);
-      await Storage.saveSport({
-        id: String(sportId),
-        name: sportName,
-        path: sportPath,
+      await Storage.saveCategory({
+        id: String(catId),
+        name: catName,
+        fullName: catFullName,
+        path: catPath,
+        sportId: sportId ? String(sportId) : null,
+        sportName: sportName || null,
         models,
         syncedAt: new Date().toISOString(),
       });
       log(`Saved to IndexedDB.`);
-      await refreshSportTabs();
-      toast(`Synced ${sportName}: ${models.length.toLocaleString()} models.`, 'ok');
+      await renderSportFilter();
+      toast(`Synced ${catFullName}: ${models.length.toLocaleString()} models.`, 'ok');
       closeModal('sync-modal');
-      await activateSport(String(sportId));
+      await activateCategory(String(catId));
     } catch (e) {
       log(`ERROR: ${e.message}`);
       toast('Sync failed: ' + e.message, 'error');
@@ -738,12 +832,12 @@
     }
   }
 
+  // CSV import: parse, group rows by category_id, save each group as one
+  // synced category. Useful when Metabase is unreachable; columns must match
+  // the MODELS_SQL projection.
   async function importFromCsv() {
     const fileEl = document.getElementById('csv-input');
-    const sportEl = document.getElementById('csv-sport');
     if (!fileEl.files[0]) return toast('Pick a CSV file first.', 'error');
-    if (!sportEl.value) return toast('Choose a sport for the CSV.', 'error');
-    const sport = JSON.parse(sportEl.value);
 
     document.getElementById('sync-progress').textContent = 'Parsing CSV…';
     Papa.parse(fileEl.files[0], {
@@ -751,19 +845,38 @@
       dynamicTyping: true,
       skipEmptyLines: true,
       complete: async (results) => {
-        const models = (results.data || []).filter((r) => r.id && r.brand_id && r.category_id);
+        const rows = (results.data || []).filter((r) => r.id && r.brand_id && r.category_id);
+        if (!rows.length) return toast('CSV had no valid rows (need id, brand_id, category_id).', 'error');
+
+        const byCategory = new Map();
+        for (const r of rows) {
+          const cid = String(r.category_id);
+          if (!byCategory.has(cid)) byCategory.set(cid, []);
+          byCategory.get(cid).push(r);
+        }
+
         try {
-          await Storage.saveSport({
-            id: String(sport.id),
-            name: sport.name,
-            path: sport.path,
-            models,
-            syncedAt: new Date().toISOString(),
-          });
-          await refreshSportTabs();
-          toast(`Imported ${models.length.toLocaleString()} models from CSV.`, 'ok');
+          let savedCount = 0;
+          for (const [cid, models] of byCategory) {
+            const sample = models[0];
+            const path = sample.category_path || '';
+            const sportId = path ? String(path).split('/')[0] : null;
+            await Storage.saveCategory({
+              id: cid,
+              name: sample.category_name || `#${cid}`,
+              fullName: sample.category_full_name || sample.category_name || `#${cid}`,
+              path,
+              sportId,
+              sportName: sportId ? sportNameFor(sportId) : null,
+              models,
+              syncedAt: new Date().toISOString(),
+            });
+            savedCount++;
+          }
+          await renderSportFilter();
+          toast(`Imported ${rows.length.toLocaleString()} models across ${savedCount} categories.`, 'ok');
           closeModal('sync-modal');
-          await activateSport(String(sport.id));
+          await renderActive();
         } catch (e) {
           toast('CSV save failed: ' + e.message, 'error');
         }
@@ -799,7 +912,6 @@
       </div>`;
       return;
     }
-    // Group by category
     const groups = new Map();
     for (const e of entries) {
       if (!groups.has(e.categoryFullName)) groups.set(e.categoryFullName, []);
@@ -862,7 +974,6 @@
     for (const e of entries) {
       const row = Object.fromEntries(headers.map((h) => [h, '']));
       row.model_id = e.sourceId;
-      // Merges supersede renames: if both are set, keep the merge and warn.
       if (e.mergeTargetId && e.newName) {
         droppedRenames++;
         row.merge_target_id = e.mergeTargetId;
@@ -878,11 +989,13 @@
     }
 
     const csv = Papa.unparse({ fields: headers, data: rows });
-    const sportName = (entries[0] && entries[0].sportName) ? entries[0].sportName.toLowerCase().replace(/\s+/g, '-') : 'merch';
+    // Filename uses the dominant sport of sheet entries when available, otherwise
+    // 'merch'. (Sheet entries inherit sportName from the originating category.)
+    const sportTag = entries.find((e) => e.sportName)?.sportName?.toLowerCase().replace(/\s+/g, '-') || 'merch';
     const now = new Date();
     const stamp = now.toISOString().slice(0, 10) + '-' +
       [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, '0')).join('');
-    const filename = `merch-update-${sportName}-${stamp}.csv`;
+    const filename = `merch-update-${sportTag}-${stamp}.csv`;
 
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -939,17 +1052,6 @@
     return Array.from(m.entries())
       .map(([key, count]) => ({ key, count }))
       .sort((a, b) => b.count - a.count);
-  }
-
-  function countByCategory(models) {
-    const m = new Map();
-    for (const item of models) {
-      const id = item.category_id;
-      if (id == null) continue;
-      if (!m.has(id)) m.set(id, { id, fullName: item.category_full_name || item.category_name || `#${id}`, count: 0 });
-      m.get(id).count++;
-    }
-    return Array.from(m.values()).sort((a, b) => b.count - a.count);
   }
 
   function formatRelative(iso) {

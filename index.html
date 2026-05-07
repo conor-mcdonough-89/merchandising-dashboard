@@ -35,7 +35,7 @@
     </button>
   </header>
 
-  <div class="sport-tabs" id="sport-tabs"></div>
+  <div class="sport-filter" id="sport-filter"></div>
 
   <main id="main"></main>
 
@@ -66,19 +66,26 @@
             <code>METABASE_URL</code> is configured server-side.
           </div>
 
-          <h3 style="margin-top: 18px;">Pick a sport to sync</h3>
-          <div class="row-flex" style="gap: 6px; flex-wrap: wrap;" id="sport-picker">
-            <span class="muted small">Loading sports...</span>
+          <h3 style="margin-top: 18px;">Pick a category to sync</h3>
+          <div class="muted small" style="margin-bottom: 8px;">
+            Models live on relatable (leaf) categories — e.g. <em>Baseball &gt; Bats</em>, not <em>Baseball</em>.
+            Sync one category at a time.
+          </div>
+          <div class="row">
+            <label for="sync-sport-filter">Filter by sport</label>
+            <select id="sync-sport-filter"><option value="">All sports</option></select>
+          </div>
+          <div class="row-flex" style="gap: 6px; flex-wrap: wrap; max-height: 240px; overflow-y: auto;" id="category-picker">
+            <span class="muted small">Loading categories...</span>
           </div>
 
           <h3 style="margin-top: 18px;">Or upload a CSV</h3>
+          <div class="muted small" style="margin-bottom: 6px;">
+            CSV rows are grouped by <code>category_id</code>; each group is saved as one synced category.
+          </div>
           <div class="row">
             <label for="csv-input">CSV file</label>
             <input type="file" id="csv-input" accept=".csv,text/csv">
-          </div>
-          <div class="row">
-            <label for="csv-sport">Assign to sport</label>
-            <select id="csv-sport"><option value="">— select —</option></select>
           </div>
           <button id="csv-upload" class="ghost">Import CSV</button>
 

@@ -18,11 +18,11 @@ to the catalog.
 | File | Role |
 | --- | --- |
 | `index.html` | Single-page shell. Password gate, sync overlay, proposal-review modal, convention modal, confirm dialog, sheet side-panel, toasts. Loads scripts in order: `storage.js`, `metabase.js`, `clustering.js`, `proposals.js`, `dashboard.js`. |
-| `dashboard.js` | All UI rendering. `Dashboard.init()` is the entry point. Owns sport tabs, sport overview, category panel, skill flows, proposal review modal, sheet builder, CSV export. |
-| `metabase.js` | Metabase client. BigQuery SQL templates (sports + models), session-token auth with API-key fallback, `/api/dataset/json` streaming for full result sets. All HTTP through `/api/metabase/*`. |
+| `dashboard.js` | All UI rendering. `Dashboard.init()` is the entry point. Owns the sport-filter pill row, the relatable-category grid, the category panel, skill flows, proposal review modal, sheet builder, CSV export. |
+| `metabase.js` | Metabase client. BigQuery SQL templates (sports + relatable categories + models-for-category), session-token auth with API-key fallback, `/api/dataset/json` streaming for full result sets. All HTTP through `/api/metabase/*`. |
 | `clustering.js` | Pure compute. `Clustering.findMergeCandidates(models)`, `Clustering.findRenameCandidates(models, convention)`, `Clustering.jaroWinkler(a, b)`, `Clustering.tokenSetOverlap(a, b)`, `Clustering.selectGoldModels(models)`, `Clustering.packClusterBatches(...)`. |
 | `proposals.js` | Client-side LLM orchestrator. `Proposals.proposeMerges`, `Proposals.proposeRenames`, `Proposals.inferConvention`. Batches large slices and filters previously-rejected source ids. |
-| `storage.js` | IndexedDB schema. Object stores: `sports`, `conventions`, `decisions`, `sheet`. Public API: `openDB`, `saveSport`, `loadSport`, `listSports`, `saveConvention`, `loadConvention`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
+| `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
 | `style.css` | Hand-written dark theme. Variables in `:root`. No frameworks. |
 | `api/metabase-proxy.js` | Vercel Edge Function. Streams `/api/metabase/*` to `${METABASE_URL}/*`. Pass-through for body and headers. |
 | `api/anthropic.js` | Shared Anthropic API helper. Holds the model-id constants `SONNET_MODEL` and `OPUS_MODEL` so swaps happen in one place. Validates `ANTHROPIC_API_KEY`. |
@@ -44,6 +44,13 @@ sport-level root. The category tree's `path` column stores ancestors as `/`-sepa
 IDs — Baseball → Bats has `path = '4000/37'`. **Boolean columns are stored as `INT64`**;
 write `WHERE sport = 1` not `WHERE sport = TRUE`.
 
+A **relatable category** is a leaf category that actually carries models —
+`has_models = 1` in `rails.categories`. Sports themselves do **not** carry models:
+"Baseball" has no models attached, "Baseball > Bats" does. The dashboard's primary
+unit of work is the relatable category; sport is just a filter applied on top of
+the relatable-category list. Sync, conventions, merges, and renames all operate on
+one relatable category at a time.
+
 Models are in one of two states this tool cares about:
 
 - `available` — visible to customers. Highest priority for cleanup.
@@ -53,17 +60,20 @@ A **gold-standard model** is `state='available' AND sold_count >= 20`. Below tha
 LLM weights the signal lower. Gold models in a `<brand, category>` slice are the
 ground truth for what naming conventions look like.
 
-### IndexedDB stores (`merch-dashboard`)
+### IndexedDB stores (`merch-dashboard`, schema v2)
 
-**`sports`** — keyed by sport id (string)
+**`categories`** — keyed by category id (string). One record per synced
+relatable category. `sportId` is indexed so the sport filter can scope the list.
 
 ```js
 {
-  id: "4000",
-  name: "Baseball",
-  path: "4000",
+  id: "37",
+  name: "Bats",
+  fullName: "Baseball > Bats",
+  path: "4000/37",
+  sportId: "4000", sportName: "Baseball",
   models: [/* full model rows from the sync query */],
-  syncedAt: "2026-05-06T..."
+  syncedAt: "2026-05-07T..."
 }
 ```
 
@@ -100,16 +110,19 @@ ground truth for what naming conventions look like.
 ```js
 {
   sourceId: 25102, sourceName: "CatX2",
-  sportId: "4000", categoryFullName: "Baseball > Bats",
+  sportId: "4000", sportName: "Baseball",
+  categoryId: "37", categoryFullName: "Baseball > Bats",
   brandName: "Marucci",
   mergeTargetId: 26611, mergeTargetName: "CATX2 Alloy",
   newName: null,                  // for renames
   reasoning: "...",
-  addedAt: "2026-05-06T..."
+  addedAt: "2026-05-07T..."
 }
 ```
 
-`localStorage` holds: `merch-active-sport`, `merch-active-category`,
+`localStorage` holds: `merch-sport-filter` (active sport-filter pill, or absent
+for "All sports"), `merch-active-category` (id of the open category, if any),
+`merch-sports-meta` (cached id→name list of sports for filter labels),
 `merch-metabase-config`, `merch-metabase-session`. `sessionStorage` holds
 `merch-auth='1'` once the password gate is unlocked.
 
@@ -121,22 +134,35 @@ ground truth for what naming conventions look like.
 - Schema: **`rails`** (Metabase virtual schema → warehouse `rails.*` tables)
 - Dialect: **BigQuery Standard SQL**
 
-The two queries live in `metabase.js` as `SPORTS_SQL` and `MODELS_SQL`. Sport id is
-passed as a `@sport_id` template tag at run time.
+Three queries live in `metabase.js`:
+
+- `SPORTS_SQL` — sport-level roots (`sport = 1`) that have at least one descendant
+  category carrying models. Used to label / filter the relatable-category list.
+- `CATEGORIES_SQL` — every relatable category (`has_models = 1`) with `sport_id`
+  derived from the path's first segment.
+- `MODELS_SQL_TEMPLATE` — models for one relatable category. The category id is
+  interpolated server-side (`__CATEGORY_ID__` placeholder) before sending. We do
+  **not** use Metabase template tags / `@param` syntax for BigQuery here — the
+  driver's parameter binding has surfaced "Query parameter not found" errors,
+  and inlining a server-controlled integer sidesteps the issue without injection
+  risk.
 
 ---
 
 ## Key flows
 
-### 1. Sync a sport
+### 1. Sync a relatable category
 
 `Header → Sync` opens the sync overlay. The overlay collects (or reuses) Metabase
-credentials, fetches the sports list from BigQuery, and lets the operator pick one to
-sync. The sync runs `MODELS_SQL` against `/api/metabase/dataset/json`, stores the
-returned rows in the `sports` IndexedDB store, and refreshes the tab strip.
+credentials, fetches the **sports** list and the **relatable-categories** list
+from BigQuery, and lets the operator pick a category to sync (with an optional
+sport filter inside the overlay). The sync runs `MODELS_SQL_TEMPLATE` against
+`/api/metabase/dataset/json`, stores the returned rows in the `categories`
+IndexedDB store keyed by category id, and refreshes the sport-filter strip.
 
 CSV upload is supported as a fallback when the Metabase proxy is unavailable. The
-CSV must have the same column names as the `MODELS_SQL` projection.
+CSV must have the same column names as the `MODELS_SQL_TEMPLATE` projection;
+rows are grouped by `category_id` and saved as one synced category per group.
 
 ### 2. Find merges
 
@@ -245,12 +271,13 @@ the Edge Functions cover. Requires Node ≥18.
 
 ## Common tasks
 
-- **Sync Baseball.** Click the **Sync** header button → pick **Baseball** → **Sync Now**.
-  Drill into **Bats** from the sport overview to start cleanup.
-- **Add a new sport tab.** Tabs auto-derive from the sports query
-  (`sport=1 AND has_models=1` descendants). When a new sport appears in the warehouse,
-  it shows up in the sync overlay's picker after the next overlay open.
-- **Re-sync a sport.** Click the **↻** icon on its tab.
+- **Sync Baseball Bats.** Click the **Sync** header button → set the in-overlay
+  sport filter to **Baseball** → click **Baseball > Bats** → **Sync Now**. The
+  category appears as a tile in the main grid; click it to start cleanup.
+- **Filter to a sport.** Click a pill in the sport-filter strip below the header.
+  The category grid scopes to that sport. The filter persists as
+  `localStorage['merch-sport-filter']`.
+- **Re-sync a category.** Click the **↻** icon in the top-right of a category tile.
 - **Re-run conventions for a brand+category.** In the category panel, click
   **Inspect Naming Conventions** → click **Infer / Refresh** on the brand. Overwrites
   the saved convention.
@@ -291,8 +318,15 @@ the Edge Functions cover. Requires Node ≥18.
 
 ## Constraints / gotchas
 
-- **BigQuery dialect.** `INT64` booleans (`= 1` not `= TRUE`). `@param` syntax for
-  parameters. Backticked refs `` `rails.models` `` are fine.
+- **BigQuery dialect.** `INT64` booleans (`= 1` not `= TRUE`). Backticked refs
+  `` `rails.models` `` are fine.
+- **No Metabase template tags for BigQuery params.** Metabase's BigQuery driver
+  has surfaced "Query parameter not found" errors when binding native template
+  tags (`@sport_id`, `{{sport_id}}`, etc.). For the `MODELS_SQL_TEMPLATE` query
+  we interpolate the integer category id server-side via a `__CATEGORY_ID__`
+  placeholder. The id is server-controlled (originates from `CATEGORIES_SQL`)
+  and validated as an integer in `fetchModelsForCategory`, so injection is not
+  a concern.
 - **Dashboard password is hardcoded** in `index.html` (`DASHBOARD_PASSWORD` constant).
   Default `shippinglogisticsguy`.
 - **Metabase session and Anthropic API key are in different places.** Metabase auth
