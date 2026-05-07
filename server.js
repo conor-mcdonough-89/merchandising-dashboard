@@ -1,14 +1,23 @@
 // server.js — zero-dep Node fallback for self-hosting.
 // Serves the static SPA and mirrors the Vercel Edge Functions:
-//   /api/metabase/:path*    -> ${METABASE_URL}/:path*
-//   /api/propose/merges     -> api/propose/merges.js handler
-//   /api/propose/renames    -> api/propose/renames.js handler
-//   /api/propose/conventions -> api/propose/conventions.js handler
+//   /api/metabase/:path*           -> ${METABASE_URL}/:path*
+//   /api/propose/merges            -> api/propose/merges.js handler
+//   /api/propose/renames           -> api/propose/renames.js handler
+//   /api/propose/conventions       -> api/propose/conventions.js handler
+//   /api/google/config             -> api/google/config.js handler
+//   /api/google/auth-exchange      -> api/google/auth-exchange.js handler
+//   /api/google/auth-refresh       -> api/google/auth-refresh.js handler
+//   /api/google/auth-callback      -> api/google/auth-callback.js handler
+//   /api/google/sheets-create      -> api/google/sheets-create.js handler
+//   /api/google/sheets-append      -> api/google/sheets-append.js handler
 //
 // Requires Node ≥18 (uses globalThis.fetch).
 //
 //   METABASE_URL=https://metabase.example.com \
 //   ANTHROPIC_API_KEY=sk-ant-... \
+//   GOOGLE_OAUTH_CLIENT_ID=... \
+//   GOOGLE_OAUTH_CLIENT_SECRET=... \
+//   GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/auth-callback \
 //   PORT=8080 npm start
 
 import http from 'node:http';
@@ -169,9 +178,15 @@ const ROUTES = [
 ];
 
 const EDGE_ROUTES = [
-  { path: '/api/propose/merges',      module: './api/propose/merges.js' },
-  { path: '/api/propose/renames',     module: './api/propose/renames.js' },
-  { path: '/api/propose/conventions', module: './api/propose/conventions.js' },
+  { path: '/api/propose/merges',          module: './api/propose/merges.js' },
+  { path: '/api/propose/renames',         module: './api/propose/renames.js' },
+  { path: '/api/propose/conventions',     module: './api/propose/conventions.js' },
+  { path: '/api/google/config',           module: './api/google/config.js' },
+  { path: '/api/google/auth-exchange',    module: './api/google/auth-exchange.js' },
+  { path: '/api/google/auth-refresh',     module: './api/google/auth-refresh.js' },
+  { path: '/api/google/auth-callback',    module: './api/google/auth-callback.js' },
+  { path: '/api/google/sheets-create',    module: './api/google/sheets-create.js' },
+  { path: '/api/google/sheets-append',    module: './api/google/sheets-append.js' },
 ];
 
 const _edgeCache = new Map();
@@ -213,4 +228,7 @@ server.listen(PORT, () => {
   console.log(`merch-dashboard listening on http://localhost:${PORT}`);
   if (!process.env.METABASE_URL) console.log('  (METABASE_URL not set — Metabase proxy will return 500)');
   if (!process.env.ANTHROPIC_API_KEY) console.log('  (ANTHROPIC_API_KEY not set — propose endpoints will return 500)');
+  if (!process.env.GOOGLE_OAUTH_CLIENT_ID || !process.env.GOOGLE_OAUTH_CLIENT_SECRET || !process.env.GOOGLE_OAUTH_REDIRECT_URI) {
+    console.log('  (GOOGLE_OAUTH_* not set — Google Sheets connector will return 500)');
+  }
 });

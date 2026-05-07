@@ -30,6 +30,7 @@
     <div id="conn-state" class="muted small"></div>
     <div class="spacer"></div>
     <button class="header-action" id="open-sync" title="Sync from Metabase">↻ Sync</button>
+    <button class="header-action" id="open-settings" title="Settings (Google Sheets)">⚙ Settings</button>
     <button class="header-action" id="open-sheet" title="View in-progress bulk import sheet">
       Sheet <span class="badge" id="sheet-count">0</span>
     </button>
@@ -134,6 +135,42 @@
     </div>
   </div>
 
+  <!-- Settings modal: Google Sheets connector -->
+  <div class="modal-backdrop hidden" id="settings-modal">
+    <div class="modal" style="max-width: 600px;">
+      <header>
+        <h2>Settings</h2>
+        <button class="close" data-close="settings-modal">×</button>
+      </header>
+      <div class="body" style="padding: 18px 22px;">
+        <h3 style="font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:2px;color:var(--accent);margin-bottom:8px;">Google Sheets</h3>
+        <p class="muted small" style="margin-bottom:10px;">
+          Stream approved proposals to a live Google Sheet instead of waiting for the CSV export. Connect your Google account, then create a new sheet — every approval (manual or LLM-driven) appends a row.
+        </p>
+        <div class="row-flex" style="margin-bottom: 10px;">
+          <span>Status:</span>
+          <span id="google-status"><span class="tag pending">Not connected</span></span>
+        </div>
+        <div class="row-flex" style="gap: 8px; margin-bottom: 14px;">
+          <button class="ghost" id="connect-google">Connect Google</button>
+          <button class="ghost" id="disconnect-google" disabled>Disconnect</button>
+        </div>
+        <div class="settings-divider"></div>
+        <div class="row-flex" style="gap: 8px; margin-top: 14px;">
+          <input type="text" id="sheet-title" placeholder="Sheet title (optional)" style="flex:1;">
+          <button class="primary" id="create-sheet" disabled>Create Sheet</button>
+        </div>
+        <div id="sheet-binding" class="settings-binding" style="margin-top: 12px;">
+          <span class="muted small">No Sheet bound.</span>
+        </div>
+      </div>
+      <footer>
+        <div class="spacer"></div>
+        <button class="ghost" data-close="settings-modal">Close</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Confirm dialog -->
   <div class="modal-backdrop hidden" id="confirm-modal">
     <div class="modal" style="max-width: 420px;">
@@ -172,6 +209,7 @@
   <!-- App scripts. Order matters. -->
   <script src="storage.js"></script>
   <script src="metabase.js"></script>
+  <script src="sheets.js"></script>
   <script src="clustering.js"></script>
   <script src="proposals.js"></script>
   <script src="dashboard.js"></script>

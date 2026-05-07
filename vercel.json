@@ -4,6 +4,12 @@
     { "source": "/api/metabase/:path*", "destination": "/api/metabase-proxy?p=:path*" },
     { "source": "/api/propose/merges", "destination": "/api/propose/merges" },
     { "source": "/api/propose/renames", "destination": "/api/propose/renames" },
-    { "source": "/api/propose/conventions", "destination": "/api/propose/conventions" }
+    { "source": "/api/propose/conventions", "destination": "/api/propose/conventions" },
+    { "source": "/api/google/config", "destination": "/api/google/config" },
+    { "source": "/api/google/auth-exchange", "destination": "/api/google/auth-exchange" },
+    { "source": "/api/google/auth-refresh", "destination": "/api/google/auth-refresh" },
+    { "source": "/api/google/auth-callback", "destination": "/api/google/auth-callback" },
+    { "source": "/api/google/sheets-create", "destination": "/api/google/sheets-create" },
+    { "source": "/api/google/sheets-append", "destination": "/api/google/sheets-append" }
   ]
 }
