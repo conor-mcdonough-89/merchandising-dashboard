@@ -4,8 +4,15 @@
 // Public API: openDB, saveCategory, loadCategory, listCategories,
 //             deleteCategory,
 //             saveConvention, loadConvention, listConventions,
+//             saveCategoryConvention, loadCategoryConvention,
+//             listConventionsForCategory,
 //             recordDecision, getRejections, clearExpiredDecisions,
 //             addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet
+//
+// The `conventions` store holds two scopes of record, distinguished by key
+// shape: brand conventions are keyed `${brandId}::${categoryId}`, category
+// conventions `category::${categoryId}`. Supabase is the source of truth;
+// this store is a read-through cache populated by /api/conventions/list.
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
@@ -92,11 +99,22 @@
   }
 
   // -------- conventions --------
+  // Brand convention key: `${brandId}::${categoryId}`
+  // Category convention key: `category::${categoryId}`
   function conventionKey(brandId, categoryId) {
     return `${brandId}::${categoryId}`;
   }
+  function categoryConventionKey(categoryId) {
+    return `category::${categoryId}`;
+  }
   async function saveConvention(record) {
-    const enriched = { ...record, key: conventionKey(record.brandId, record.categoryId) };
+    const enriched = {
+      ...record,
+      categoryId: Number(record.categoryId),
+      brandId: Number(record.brandId),
+      key: conventionKey(record.brandId, record.categoryId),
+      scope: 'brand',
+    };
     const store = await tx('conventions', 'readwrite');
     return promisify(store.put(enriched));
   }
@@ -104,9 +122,45 @@
     const store = await tx('conventions', 'readonly');
     return promisify(store.get(conventionKey(brandId, categoryId)));
   }
+  async function saveCategoryConvention(record) {
+    const enriched = {
+      ...record,
+      categoryId: Number(record.categoryId),
+      key: categoryConventionKey(record.categoryId),
+      scope: 'category',
+      brandId: null,
+      brandName: null,
+    };
+    const store = await tx('conventions', 'readwrite');
+    return promisify(store.put(enriched));
+  }
+  async function loadCategoryConvention(categoryId) {
+    const store = await tx('conventions', 'readonly');
+    return promisify(store.get(categoryConventionKey(categoryId)));
+  }
   async function listConventions() {
     const store = await tx('conventions', 'readonly');
     return promisify(store.getAll());
+  }
+  // Cache fallback used when Supabase is unreachable. Returns the same
+  // shape the /api/conventions/list endpoint returns.
+  async function listConventionsForCategory(categoryId) {
+    const store = await tx('conventions', 'readonly');
+    const idx = store.index('categoryId');
+    const all = await promisify(idx.getAll(IDBKeyRange.only(Number(categoryId))));
+    // Tolerate string-typed categoryId in older cached records.
+    const stringMatches = await promisify(idx.getAll(IDBKeyRange.only(String(categoryId))));
+    const merged = [...all, ...stringMatches];
+    const seen = new Set();
+    const dedup = [];
+    for (const r of merged) {
+      if (seen.has(r.key)) continue;
+      seen.add(r.key);
+      dedup.push(r);
+    }
+    const category = dedup.find((r) => r.scope === 'category') || null;
+    const brands = dedup.filter((r) => r.scope === 'brand');
+    return { category, brands };
   }
 
   // -------- decisions --------
@@ -179,6 +233,8 @@
     openDB,
     saveCategory, loadCategory, listCategories, deleteCategory,
     saveConvention, loadConvention, listConventions, conventionKey,
+    saveCategoryConvention, loadCategoryConvention, categoryConventionKey,
+    listConventionsForCategory,
     recordDecision, getRejections, clearExpiredDecisions,
     addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
   };

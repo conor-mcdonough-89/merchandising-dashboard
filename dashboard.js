@@ -28,6 +28,12 @@
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
   const SPORTS_META_KEY = 'merch-sports-meta'; // cached sport id->name map
 
+  // Convention modal state. Per-card edit drafts, keyed by convention key
+  // (brand: `${brandId}::${categoryId}`, category: `category::${categoryId}`).
+  // The map survives partial re-renders of the modal so editing one card
+  // doesn't blow away another's draft.
+  let _conventionEdits = new Map();
+
   // Bulk-import CSV / Sheets header order. Locked by engineering's importer.
   // Used by downloadCsv (CSV export) and Sheets.createSheet/appendRows
   // (live sheet sync). Same row-builder feeds both paths.
@@ -777,13 +783,19 @@
     const grouped = Proposals.groupByBrandCategory(models);
     openProposalModal('Finding renames...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Checking ${grouped.length} brands against saved conventions...</div>`);
 
+    // Prefetch all conventions for this category so each brand call has the
+    // category-level convention to send alongside its own.
+    const convPayload = await loadConventionsForCategory(cat.id);
+    const brandConvByKey = new Map((convPayload.brands || []).map((b) => [b.key, b]));
+    const categoryConvention = convPayload.category || null;
+
     let allProposals = [];
     let allRejections = [];
     let missingConvention = [];
     const allFailures = [];
     try {
       for (const g of grouped) {
-        const conv = await Storage.loadConvention(g.brandId, g.categoryId);
+        const conv = brandConvByKey.get(`${g.brandId}::${cat.id}`) || await Storage.loadConvention(g.brandId, g.categoryId);
         if (!conv) {
           missingConvention.push(g.brandName);
           continue;
@@ -795,6 +807,7 @@
           categoryId: g.categoryId,
           models: g.models,
           convention: conv,
+          categoryConvention,
           onProgress: (p) => updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}`),
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
@@ -829,60 +842,342 @@
     renderProposalTable();
   }
 
+  // -------- conventions: backend client (Supabase via Edge Functions) --------
+
+  // Server records use snake_case (Postgres columns); local cache uses camelCase
+  // (matches the historical IndexedDB shape and the LLM payload). Convert at the
+  // boundary so the rest of the UI never sees snake_case.
+  function fromServerRow(row) {
+    if (!row) return null;
+    return {
+      key: row.key,
+      scope: row.scope,
+      brandId: row.brand_id,
+      brandName: row.brand_name,
+      categoryId: row.category_id,
+      categoryFullName: row.category_full_name,
+      pattern: row.pattern || '',
+      examples: row.examples || [],
+      rules: row.rules || [],
+      exceptions: row.exceptions || [],
+      inferredAt: row.inferred_at || null,
+      editedAt: row.edited_at || null,
+    };
+  }
+
+  async function loadConventionsForCategory(categoryId) {
+    try {
+      const res = await fetch(`/api/conventions/list?categoryId=${encodeURIComponent(categoryId)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const category = fromServerRow(data.category);
+      const brands = (data.brands || []).map(fromServerRow);
+      // Mirror into IndexedDB cache.
+      if (category) await Storage.saveCategoryConvention(category);
+      for (const b of brands) await Storage.saveConvention(b);
+      return { category, brands, fromCache: false };
+    } catch (e) {
+      const cached = await Storage.listConventionsForCategory(categoryId);
+      return { ...cached, fromCache: true, error: e.message };
+    }
+  }
+
+  async function upsertConvention(record) {
+    const payload = {
+      scope: record.scope,
+      brandId: record.brandId,
+      brandName: record.brandName,
+      categoryId: record.categoryId,
+      categoryFullName: record.categoryFullName,
+      pattern: record.pattern || '',
+      examples: record.examples || [],
+      rules: record.rules || [],
+      exceptions: record.exceptions || [],
+      inferredAt: record.inferredAt || null,
+    };
+    const res = await fetch('/api/conventions/upsert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Save failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const written = fromServerRow(data.row) || record;
+    if (written.scope === 'category') await Storage.saveCategoryConvention(written);
+    else await Storage.saveConvention(written);
+    return written;
+  }
+
   // -------- skill: inspect conventions --------
 
   async function runInspectConventions(cat) {
-    const models = cat.models || [];
-    const grouped = Proposals.groupByBrandCategory(models);
+    _conventionEdits = new Map();
     openModal('convention-modal');
-    const body = document.getElementById('convention-body');
     document.getElementById('convention-title').textContent = `Naming Conventions — ${cat.fullName || cat.name}`;
+    const body = document.getElementById('convention-body');
+    body.innerHTML = `<div style="padding:18px;text-align:center;"><span class="spinner"></span> Loading conventions…</div>`;
 
-    body.innerHTML = `<p class="muted small">Pick a brand to infer or refresh its naming convention. Saved conventions power Find Renames.</p>` +
-      grouped.map((g) => `
-        <div class="convention-card" data-brand-id="${g.brandId}" data-brand-name="${escapeAttr(g.brandName)}">
-          <h4>${escapeHtml(g.brandName)} <span class="muted small">(${g.models.length.toLocaleString()} models)</span></h4>
-          <div class="convention-content"><span class="muted small">Loading saved convention…</span></div>
-          <div style="margin-top:8px;">
-            <button class="ghost btn-infer">Infer / Refresh</button>
-          </div>
-        </div>
-      `).join('');
+    const payload = await loadConventionsForCategory(cat.id);
+    if (payload.error) {
+      toast(`Conventions backend unreachable — using cached data. ${payload.error}`, 'error');
+    }
+    renderConventionModalBody(cat, payload);
+  }
 
+  function renderConventionModalBody(cat, payload) {
+    const body = document.getElementById('convention-body');
+    const brandsByKey = new Map((payload.brands || []).map((b) => [b.key, b]));
+    const grouped = Proposals.groupByBrandCategory(cat.models || []);
+
+    const note = payload.fromCache
+      ? `<div class="convention-banner warn">Showing cached conventions. Saves are disabled until the backend is reachable.</div>`
+      : `<p class="muted small">Edits to either card persist to Supabase and feed Find Renames. Brand-level rules win where they conflict with the category convention.</p>`;
+
+    body.innerHTML = note +
+      `<div id="cat-conv-card" class="convention-card category-scope" data-conv-key="${escapeAttr(`category::${cat.id}`)}"></div>` +
+      grouped.map((g) => {
+        const key = `${g.brandId}::${cat.id}`;
+        return `<div class="convention-card brand-scope" data-conv-key="${escapeAttr(key)}" data-brand-id="${g.brandId}" data-brand-name="${escapeAttr(g.brandName)}" data-models-count="${g.models.length}"></div>`;
+      }).join('');
+
+    // Render the category card
+    renderCategoryCard(cat, payload.category, /* readOnly */ payload.fromCache);
+
+    // Render each brand card
     for (const g of grouped) {
-      const card = body.querySelector(`[data-brand-id="${g.brandId}"]`);
-      const content = card.querySelector('.convention-content');
-      const conv = await Storage.loadConvention(g.brandId, g.categoryId);
-      content.innerHTML = renderConventionContent(conv);
-      card.querySelector('.btn-infer').addEventListener('click', async () => {
-        content.innerHTML = `<span class="spinner"></span> Inferring convention from gold-standard models…`;
-        try {
-          const inferred = await Proposals.inferConvention({
-            brandName: g.brandName,
-            brandId: g.brandId,
-            categoryFullName: g.categoryFullName,
-            categoryId: g.categoryId,
-            models: g.models,
-          });
-          await Storage.saveConvention(inferred);
-          content.innerHTML = renderConventionContent(inferred);
-          toast(`Saved convention for ${g.brandName}.`, 'ok');
-        } catch (e) {
-          content.innerHTML = `<span style="color:var(--bad)">${escapeHtml(e.message)}</span>`;
-        }
+      const conv = brandsByKey.get(`${g.brandId}::${cat.id}`) || null;
+      renderBrandCard(cat, g, conv, payload.fromCache);
+    }
+  }
+
+  function emptyConvention(scope, cat, group) {
+    if (scope === 'category') {
+      return {
+        scope: 'category',
+        categoryId: Number(cat.id),
+        categoryFullName: cat.fullName || cat.name,
+        pattern: '', examples: [], rules: [], exceptions: [],
+      };
+    }
+    return {
+      scope: 'brand',
+      brandId: group.brandId,
+      brandName: group.brandName,
+      categoryId: Number(cat.id),
+      categoryFullName: cat.fullName || cat.name,
+      pattern: '', examples: [], rules: [], exceptions: [],
+    };
+  }
+
+  function renderCategoryCard(cat, conv, readOnly) {
+    const card = document.getElementById('cat-conv-card');
+    if (!card) return;
+    const key = `category::${cat.id}`;
+    const editing = _conventionEdits.has(key);
+    const data = editing ? _conventionEdits.get(key) : (conv || emptyConvention('category', cat));
+    const titleHtml = `<h4>Category convention <span class="muted small">applies to every brand in ${escapeHtml(cat.fullName || cat.name)}</span></h4>`;
+
+    if (editing) {
+      card.innerHTML = titleHtml + renderConventionEditor(data, { allowExamples: false });
+      bindEditorHandlers(card, key, async (draft) => {
+        const merged = { ...(conv || emptyConvention('category', cat)), ...draft, scope: 'category', categoryId: Number(cat.id), categoryFullName: cat.fullName || cat.name };
+        await saveConventionAndRerender(cat, merged, () => renderCategoryCard(cat, merged, readOnly));
+      }, () => {
+        _conventionEdits.delete(key);
+        renderCategoryCard(cat, conv, readOnly);
+      });
+      return;
+    }
+
+    card.innerHTML = titleHtml + renderConventionView(data, { showExamples: false }) + `
+      <div class="card-actions">
+        <button class="ghost btn-edit" ${readOnly ? 'disabled title="Backend unreachable"' : ''}>Edit</button>
+      </div>
+    `;
+    const editBtn = card.querySelector('.btn-edit');
+    if (editBtn && !readOnly) {
+      editBtn.addEventListener('click', () => {
+        _conventionEdits.set(key, sanitizeForEdit(data));
+        renderCategoryCard(cat, conv, readOnly);
       });
     }
   }
 
-  function renderConventionContent(conv) {
-    if (!conv) return `<span class="muted small">No saved convention. Click <strong>Infer / Refresh</strong> to generate one.</span>`;
+  function renderBrandCard(cat, group, conv, readOnly) {
+    const card = document.querySelector(`.convention-card[data-conv-key="${group.brandId}::${cat.id}"]`);
+    if (!card) return;
+    const key = `${group.brandId}::${cat.id}`;
+    const editing = _conventionEdits.has(key);
+    const data = editing ? _conventionEdits.get(key) : (conv || emptyConvention('brand', cat, group));
+    const titleHtml = `<h4>${escapeHtml(group.brandName)} <span class="muted small">(${group.models.length.toLocaleString()} models)</span></h4>`;
+
+    if (editing) {
+      card.innerHTML = titleHtml + renderConventionEditor(data, { allowExamples: true });
+      bindEditorHandlers(card, key, async (draft) => {
+        const merged = {
+          ...(conv || emptyConvention('brand', cat, group)),
+          ...draft,
+          scope: 'brand',
+          brandId: group.brandId,
+          brandName: group.brandName,
+          categoryId: Number(cat.id),
+          categoryFullName: cat.fullName || cat.name,
+        };
+        await saveConventionAndRerender(cat, merged, () => renderBrandCard(cat, group, merged, readOnly));
+      }, () => {
+        _conventionEdits.delete(key);
+        renderBrandCard(cat, group, conv, readOnly);
+      });
+      return;
+    }
+
+    card.innerHTML = titleHtml + renderConventionView(data, { showExamples: true }) + `
+      <div class="card-actions">
+        <button class="ghost btn-edit" ${readOnly ? 'disabled title="Backend unreachable"' : ''}>Edit</button>
+        <button class="ghost btn-infer" ${readOnly ? 'disabled title="Backend unreachable"' : ''}>Infer / Refresh</button>
+      </div>
+    `;
+    const editBtn = card.querySelector('.btn-edit');
+    const inferBtn = card.querySelector('.btn-infer');
+    if (editBtn && !readOnly) {
+      editBtn.addEventListener('click', () => {
+        _conventionEdits.set(key, sanitizeForEdit(data));
+        renderBrandCard(cat, group, conv, readOnly);
+      });
+    }
+    if (inferBtn && !readOnly) {
+      inferBtn.addEventListener('click', () => inferBrandConvention(cat, group, readOnly));
+    }
+  }
+
+  async function inferBrandConvention(cat, group, readOnly) {
+    const card = document.querySelector(`.convention-card[data-conv-key="${group.brandId}::${cat.id}"]`);
+    if (!card) return;
+    const titleHtml = `<h4>${escapeHtml(group.brandName)} <span class="muted small">(${group.models.length.toLocaleString()} models)</span></h4>`;
+    card.innerHTML = titleHtml + `<div class="muted small" style="padding:10px 0;"><span class="spinner"></span> Inferring convention from gold-standard models…</div>`;
+    try {
+      const inferred = await Proposals.inferConvention({
+        brandName: group.brandName,
+        brandId: group.brandId,
+        categoryFullName: group.categoryFullName,
+        categoryId: group.categoryId,
+        models: group.models,
+      });
+      const saved = await upsertConvention({ ...inferred, scope: 'brand' });
+      renderBrandCard(cat, group, saved, readOnly);
+      toast(`Saved convention for ${group.brandName}.`, 'ok');
+    } catch (e) {
+      // Re-render the card from whatever was already there so the user can retry.
+      const existing = await Storage.loadConvention(group.brandId, cat.id);
+      renderBrandCard(cat, group, existing || null, readOnly);
+      toast(`Inference failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function saveConventionAndRerender(cat, merged, rerender) {
+    try {
+      const saved = await upsertConvention(merged);
+      _conventionEdits.delete(merged.key || (merged.scope === 'category' ? `category::${cat.id}` : `${merged.brandId}::${cat.id}`));
+      const label = merged.scope === 'category' ? 'category convention' : `convention for ${merged.brandName}`;
+      toast(`Saved ${label}.`, 'ok');
+      // Use the saved record (server is authoritative on edited_at, etc.).
+      if (saved.scope === 'category') renderCategoryCard(cat, saved, false);
+      else {
+        const grouped = Proposals.groupByBrandCategory(cat.models || []);
+        const group = grouped.find((g) => g.brandId === saved.brandId);
+        if (group) renderBrandCard(cat, group, saved, false);
+      }
+    } catch (e) {
+      toast(`Save failed: ${e.message}`, 'error');
+      // Keep the editor open so the operator can retry. Re-render the card.
+      rerender();
+    }
+  }
+
+  function sanitizeForEdit(conv) {
+    return {
+      pattern: conv.pattern || '',
+      examples: Array.isArray(conv.examples) ? conv.examples.slice() : [],
+      rules: Array.isArray(conv.rules) ? conv.rules.slice() : [],
+      exceptions: Array.isArray(conv.exceptions) ? conv.exceptions.slice() : [],
+    };
+  }
+
+  function renderConventionView(conv, { showExamples }) {
+    const empty = !(conv.pattern || (conv.examples && conv.examples.length) || (conv.rules && conv.rules.length) || (conv.exceptions && conv.exceptions.length));
+    if (empty) {
+      return `<div class="muted small" style="padding:6px 0;">Empty. Click <strong>Edit</strong>${conv.scope === 'brand' ? ' or <strong>Infer / Refresh</strong>' : ''} to populate.</div>`;
+    }
+    const stamp = conv.editedAt
+      ? `Edited ${formatRelative(conv.editedAt)}${conv.inferredAt ? ` · inferred ${formatRelative(conv.inferredAt)}` : ''}.`
+      : conv.inferredAt ? `Inferred ${formatRelative(conv.inferredAt)}.` : '';
     return `
       <div><strong>Pattern:</strong> <span class="pattern">${escapeHtml(conv.pattern || '—')}</span></div>
-      ${conv.examples?.length ? `<div style="margin-top:6px;"><strong>Examples:</strong> ${conv.examples.map((e) => `<span class="tag">${escapeHtml(e)}</span>`).join(' ')}</div>` : ''}
+      ${showExamples && conv.examples?.length ? `<div style="margin-top:6px;"><strong>Examples:</strong> ${conv.examples.map((e) => `<span class="tag">${escapeHtml(e)}</span>`).join(' ')}</div>` : ''}
       ${conv.rules?.length ? `<div style="margin-top:6px;"><strong>Rules:</strong><ul>${conv.rules.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul></div>` : ''}
       ${conv.exceptions?.length ? `<div><strong>Exceptions:</strong><ul>${conv.exceptions.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>` : ''}
-      <div class="muted small" style="margin-top:6px;">Inferred ${formatRelative(conv.inferredAt)}.</div>
+      ${stamp ? `<div class="muted small" style="margin-top:6px;">${escapeHtml(stamp)}</div>` : ''}
     `;
+  }
+
+  function renderConventionEditor(draft, { allowExamples }) {
+    const linesValue = (arr) => (Array.isArray(arr) ? arr.join('\n') : '');
+    return `
+      <div class="conv-editor">
+        <label class="conv-field">
+          <span class="conv-label">Pattern</span>
+          <input type="text" class="conv-pattern" value="${escapeAttr(draft.pattern || '')}" placeholder="e.g. <Series><Generation> <Material>">
+        </label>
+        ${allowExamples ? `
+        <label class="conv-field">
+          <span class="conv-label">Examples (one per line)</span>
+          <textarea class="conv-examples" rows="3" placeholder="CATX2 Composite&#10;CATX2 Alloy">${escapeHtml(linesValue(draft.examples))}</textarea>
+        </label>` : ''}
+        <label class="conv-field">
+          <span class="conv-label">Rules (one per line)</span>
+          <textarea class="conv-rules" rows="5" placeholder="One rule per line.">${escapeHtml(linesValue(draft.rules))}</textarea>
+        </label>
+        <label class="conv-field">
+          <span class="conv-label">Exceptions (one per line)</span>
+          <textarea class="conv-exceptions" rows="3" placeholder="One exception per line.">${escapeHtml(linesValue(draft.exceptions))}</textarea>
+        </label>
+        <div class="card-actions edit-actions">
+          <button class="ghost btn-cancel">Cancel</button>
+          <button class="primary btn-save">Save</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindEditorHandlers(card, key, onSave, onCancel) {
+    const splitLines = (s) => (s || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const collect = () => {
+      const examplesEl = card.querySelector('.conv-examples');
+      return {
+        pattern: card.querySelector('.conv-pattern').value.trim(),
+        examples: examplesEl ? splitLines(examplesEl.value) : (_conventionEdits.get(key)?.examples || []),
+        rules: splitLines(card.querySelector('.conv-rules').value),
+        exceptions: splitLines(card.querySelector('.conv-exceptions').value),
+      };
+    };
+    // Persist edits to the in-memory draft on input so the map survives re-renders
+    // triggered elsewhere (e.g., another card's Save).
+    card.querySelectorAll('input, textarea').forEach((el) => {
+      el.addEventListener('input', () => _conventionEdits.set(key, collect()));
+    });
+    card.querySelector('.btn-save').addEventListener('click', () => onSave(collect()));
+    card.querySelector('.btn-cancel').addEventListener('click', () => {
+      const draft = _conventionEdits.get(key);
+      const dirty = draft && (draft.pattern || (draft.rules && draft.rules.length) || (draft.exceptions && draft.exceptions.length) || (draft.examples && draft.examples.length));
+      if (dirty) {
+        showConfirm('Discard changes?', 'Unsaved edits to this convention will be lost.', () => onCancel());
+      } else {
+        onCancel();
+      }
+    });
   }
 
   // -------- proposal review modal --------
