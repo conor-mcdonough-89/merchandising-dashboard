@@ -18,6 +18,8 @@
   const SESSION_KEY = 'merch-metabase-session';
   const DB_ID = 7;
 
+  // Sports = sport-level roots (sport=1) that have at least one descendant
+  // category carrying models. Used to label/filter the relatable-category list.
   const SPORTS_SQL = `
 SELECT id, name, path
 FROM rails.categories
@@ -30,7 +32,27 @@ WHERE sport = 1
 ORDER BY position
 `.trim();
 
-  const MODELS_SQL = `
+  // Relatable categories = leaf categories with has_models=1 (the ones models
+  // are actually attached to: "Baseball > Bats", "Hockey > Sticks", ...).
+  // sport_id is the first segment of the category path.
+  const CATEGORIES_SQL = `
+SELECT
+  c.id,
+  c.name,
+  c.full_name,
+  c.path,
+  CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) AS sport_id
+FROM rails.categories AS c
+WHERE c.has_models = 1
+ORDER BY c.full_name
+`.trim();
+
+  // Models for a single relatable category. The category id is interpolated
+  // server-side via runNativeQuery -- it's a server-controlled integer
+  // (originating from CATEGORIES_SQL) so injection is not a concern, and
+  // inlining sidesteps Metabase's BigQuery template-tag parameter binding,
+  // which has bitten us with "Query parameter not found" errors.
+  const MODELS_SQL_TEMPLATE = `
 SELECT
   m.id,
   m.name,
@@ -58,7 +80,7 @@ JOIN (
 ) AS b ON b.detail_id = m.brand_id
 JOIN rails.categories AS c ON c.id = m.category_id
 WHERE m.state IN ('available', 'pending')
-  AND c.path LIKE CONCAT(@sport_id, '/%')
+  AND m.category_id = __CATEGORY_ID__
 `.trim();
 
   // -------- config --------
@@ -155,32 +177,12 @@ WHERE m.state IN ('available', 'pending')
 
   // Streams /api/dataset/json for full result sets (no row cap).
   // Returns parsed JSON array of rows.
-  async function runNativeQuery(sql, params = {}) {
-    const templateTags = {};
-    const parameters = [];
-    for (const [name, value] of Object.entries(params)) {
-      templateTags[name] = {
-        id: name,
-        name,
-        'display-name': name,
-        type: typeof value === 'number' ? 'number' : 'text',
-      };
-      parameters.push({
-        type: 'category',
-        target: ['variable', ['template-tag', name]],
-        value: String(value),
-      });
-    }
+  async function runNativeQuery(sql) {
     const body = {
       database: DB_ID,
       type: 'native',
-      native: {
-        query: sql,
-        'template-tags': templateTags,
-      },
-      parameters,
+      native: { query: sql },
     };
-
     // /api/dataset/json wants the payload as a single form field `query`.
     // Sending JSON directly returns 400 ("missing required key, received: nil").
     const res = await request('/api/dataset/json', {
@@ -206,8 +208,24 @@ WHERE m.state IN ('available', 'pending')
     }));
   }
 
-  async function fetchModelsForSport(sportId) {
-    const rows = await runNativeQuery(MODELS_SQL, { sport_id: sportId });
+  async function fetchRelatableCategories() {
+    const rows = await runNativeQuery(CATEGORIES_SQL);
+    return rows.map((r) => ({
+      id: String(r.id),
+      name: r.name,
+      fullName: r.full_name,
+      path: r.path,
+      sportId: r.sport_id == null ? null : String(r.sport_id),
+    }));
+  }
+
+  async function fetchModelsForCategory(categoryId) {
+    const id = parseInt(categoryId, 10);
+    if (!Number.isFinite(id)) {
+      throw new Error(`Invalid category id: ${categoryId}`);
+    }
+    const sql = MODELS_SQL_TEMPLATE.replace('__CATEGORY_ID__', String(id));
+    const rows = await runNativeQuery(sql);
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
@@ -238,9 +256,11 @@ WHERE m.state IN ('available', 'pending')
     ensureAuth,
     testConnection,
     fetchSports,
-    fetchModelsForSport,
+    fetchRelatableCategories,
+    fetchModelsForCategory,
     SPORTS_SQL,
-    MODELS_SQL,
+    CATEGORIES_SQL,
+    MODELS_SQL_TEMPLATE,
     DB_ID,
   };
 })(window);
