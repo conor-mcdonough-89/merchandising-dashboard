@@ -56,22 +56,27 @@
     const clusters = Clustering.findMergeCandidates(models, { excludeIds: rejected });
     if (!clusters.length) return { proposals: [], rejections: [], batches: 0 };
 
-    const batches = Clustering.packClusterBatches(clusters, 25);
+    const batches = Clustering.packClusterBatches(clusters, 10);
     const allProposals = [];
     const allRejections = [];
+    const failedBatches = [];
     for (let i = 0; i < batches.length; i++) {
       if (onProgress) onProgress({ done: i, total: batches.length });
-      const data = await postJson('/api/propose/merges', {
-        brand_name: brandName,
-        category_full_name: categoryFullName,
-        gold_models: goldModels,
-        candidate_clusters: batches[i],
-      });
-      if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
-      if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      try {
+        const data = await postJson('/api/propose/merges', {
+          brand_name: brandName,
+          category_full_name: categoryFullName,
+          gold_models: goldModels,
+          candidate_clusters: batches[i],
+        });
+        if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
+        if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      } catch (e) {
+        failedBatches.push({ index: i, error: e.message });
+      }
     }
     if (onProgress) onProgress({ done: batches.length, total: batches.length });
-    return { proposals: allProposals, rejections: allRejections, batches: batches.length };
+    return { proposals: allProposals, rejections: allRejections, batches: batches.length, failedBatches };
   }
 
   async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, onProgress }) {
@@ -81,23 +86,28 @@
     const candidates = Clustering.findRenameCandidates(models, conv, { excludeIds: rejected });
     if (!candidates.length) return { proposals: [], rejections: [], batches: 0, convention: conv };
 
-    const batches = Clustering.packRenameBatches(candidates, 50);
+    const batches = Clustering.packRenameBatches(candidates, 20);
     const allProposals = [];
     const allRejections = [];
+    const failedBatches = [];
     for (let i = 0; i < batches.length; i++) {
       if (onProgress) onProgress({ done: i, total: batches.length });
-      const data = await postJson('/api/propose/renames', {
-        brand_name: brandName,
-        category_full_name: categoryFullName,
-        convention: conv,
-        gold_models: goldModels,
-        candidates: batches[i],
-      });
-      if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
-      if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      try {
+        const data = await postJson('/api/propose/renames', {
+          brand_name: brandName,
+          category_full_name: categoryFullName,
+          convention: conv,
+          gold_models: goldModels,
+          candidates: batches[i],
+        });
+        if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
+        if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      } catch (e) {
+        failedBatches.push({ index: i, error: e.message });
+      }
     }
     if (onProgress) onProgress({ done: batches.length, total: batches.length });
-    return { proposals: allProposals, rejections: allRejections, batches: batches.length, convention: conv };
+    return { proposals: allProposals, rejections: allRejections, batches: batches.length, convention: conv, failedBatches };
   }
 
   async function inferConvention({ brandName, brandId, categoryFullName, categoryId, models }) {

@@ -378,49 +378,6 @@ table.list .clickable:hover { color: var(--accent); }
 .tag.available { color: var(--green); border-color: var(--green); }
 .tag.pending { color: var(--warn); border-color: var(--warn); }
 
-/* ─── Skill buttons ─── */
-.skill-row {
-  display: flex;
-  gap: 14px;
-  margin: 18px 0 24px;
-}
-.skill-btn {
-  flex: 1;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text);
-  transition: all .15s;
-}
-.skill-btn:hover { border-color: var(--accent); transform: translateY(-1px); }
-.skill-btn .title {
-  font-family: 'Bebas Neue', sans-serif;
-  font-size: 18px;
-  letter-spacing: 1.5px;
-  color: var(--accent);
-}
-.skill-btn .desc {
-  font-family: 'DM Mono', monospace;
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 6px;
-  line-height: 1.5;
-}
-
-.toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 0 0 14px;
-  font-family: 'DM Mono', monospace;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  color: var(--muted);
-}
 .pill-group {
   display: inline-flex;
   background: var(--surface2);
@@ -594,6 +551,118 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .action-pill:hover { color: var(--text); border-color: var(--text); }
 .action-pill.approve.active { background: var(--green); color: var(--bg); border-color: var(--green); font-weight: 600; }
 .action-pill.reject.active { background: var(--red); color: var(--bg); border-color: var(--red); font-weight: 600; }
+
+/* ─── Filter / mode toolbars (category panel) ─── */
+.filter-toolbar {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+.filter-label.flex { flex: 1; min-width: 200px; }
+.filter-label select { min-width: 200px; }
+.filter-label input[type="search"] { width: 100%; }
+
+.mode-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.mode-toolbar .pill-group .pill { padding: 6px 14px; font-size: 11px; }
+.mode-toolbar .ghost { font-size: 10px; padding: 6px 12px; }
+
+.mode-hint {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  line-height: 1.5;
+  min-height: 0;
+}
+.mode-hint:empty { display: none; }
+.mode-hint.mode-merge {
+  background: rgba(74, 232, 154, 0.06);
+  border: 1px solid rgba(74, 232, 154, 0.4);
+  color: var(--green);
+}
+.mode-hint.mode-rename {
+  background: rgba(74, 143, 232, 0.06);
+  border: 1px solid rgba(74, 143, 232, 0.4);
+  color: var(--accent2);
+}
+
+/* ─── Model table (category panel) ─── */
+.model-table-wrap {
+  max-height: calc(100vh - 360px);
+  overflow: auto;
+}
+.model-table th.sortable { cursor: pointer; user-select: none; }
+.model-table th.sortable:hover { color: var(--accent); }
+.model-table .model-name { font-weight: 500; }
+.model-table .model-name.editable { cursor: text; border-bottom: 1px dashed var(--accent2); }
+.model-table .model-name.editable:hover { color: var(--accent); }
+.model-table input.rename-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.model-table.mode-merge tbody tr { cursor: pointer; }
+.model-table tr.row-source td { background: rgba(74, 232, 154, 0.10); border-left: 3px solid var(--green); }
+.model-table tr.row-target td { background: rgba(74, 143, 232, 0.10); border-left: 3px solid var(--accent2); }
+
+.merge-confirm-bar {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  box-shadow: 0 -8px 24px rgba(0,0,0,0.3);
+}
+.merge-confirm-bar.hidden { display: none; }
+.merge-confirm-text { flex: 1; line-height: 1.5; }
+
+/* ─── Settings modal ─── */
+.settings-divider {
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+.settings-binding {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.settings-binding a { word-break: break-all; }
 
 /* ─── Sync overlay (inside the sync modal) ─── */
 .sync-overlay { padding: 20px 24px; }

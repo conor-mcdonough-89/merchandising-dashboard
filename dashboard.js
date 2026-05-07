@@ -14,11 +14,29 @@
   let _sportsMeta = [];           // [{id, name}] -- sports that have at least one relatable category
   let _sportFilter = 'all';       // 'all' or sport id
   let _activeCategoryId = null;   // id of the relatable category currently open
+  let _activeCategory = null;     // hydrated cat record while the panel is open
   let _proposalState = null;
+
+  // Category-panel state. Reset whenever the active category changes.
+  let _filters = { brand: 'all', state: 'all', search: '' };
+  let _sort = { col: 'sold_count', dir: 'desc' };
+  let _mode = 'browse'; // 'browse' | 'merge' | 'rename'
+  let _mergeSelection = { sourceId: null, targetId: null };
+  let _renameEditingId = null; // model id whose name cell is currently being edited
 
   const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
   const SPORTS_META_KEY = 'merch-sports-meta'; // cached sport id->name map
+
+  // Bulk-import CSV / Sheets header order. Locked by engineering's importer.
+  // Used by downloadCsv (CSV export) and Sheets.createSheet/appendRows
+  // (live sheet sync). Same row-builder feeds both paths.
+  const BULK_IMPORT_HEADERS = [
+    'model_id', 'description', 'position', 'primary_image_url', 'secondary_image_url',
+    'state', 'merge_target_id', 'category_id', 'name', 'brand_id', 'synonyms',
+    'price_retail', 'gtin', 'mpn', 'line', 'importance', 'expert_pick',
+    'value_guides_start_date', 'detail_ids',
+  ];
 
   // -------- init --------
 
@@ -40,6 +58,7 @@
     });
     document.getElementById('open-sync').addEventListener('click', () => openSyncModal());
     document.getElementById('open-sheet').addEventListener('click', openSheet);
+    document.getElementById('open-settings').addEventListener('click', openSettingsModal);
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
     document.getElementById('save-mb-config').addEventListener('click', saveMetabaseConfig);
     document.getElementById('test-mb-config').addEventListener('click', testMetabaseConnection);
@@ -51,11 +70,15 @@
     document.getElementById('clear-sheet').addEventListener('click', confirmClearSheet);
     document.getElementById('download-csv').addEventListener('click', downloadCsv);
     document.getElementById('sync-sport-filter').addEventListener('change', () => renderCategoryPicker());
+    document.getElementById('connect-google').addEventListener('click', connectGoogleSheets);
+    document.getElementById('disconnect-google').addEventListener('click', disconnectGoogleSheets);
+    document.getElementById('create-sheet').addEventListener('click', createGoogleSheet);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal']
+        ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal', 'settings-modal']
           .forEach((id) => closeModal(id));
         closeSheet();
+        if (_mode === 'rename' && _renameEditingId != null) cancelRenameEdit();
       }
     });
   }
@@ -220,15 +243,45 @@
   async function activateCategory(categoryId) {
     _activeCategoryId = String(categoryId);
     localStorage.setItem(ACTIVE_CATEGORY_KEY, _activeCategoryId);
+    // Reset panel-local state for the new category.
+    _filters = { brand: 'all', state: 'all', search: '' };
+    _sort = { col: 'sold_count', dir: 'desc' };
+    _mode = 'browse';
+    _mergeSelection = { sourceId: null, targetId: null };
+    _renameEditingId = null;
     await renderActive();
   }
 
+  // -------- category panel: filter toolbar + model table + modes --------
+
+  function filteredModels(cat) {
+    const all = (cat && cat.models) || [];
+    const q = (_filters.search || '').trim().toLowerCase();
+    const out = [];
+    for (const m of all) {
+      if (_filters.brand !== 'all' && String(m.brand_id) !== String(_filters.brand)) continue;
+      if (_filters.state !== 'all' && m.state !== _filters.state) continue;
+      if (q && !(m.name || '').toLowerCase().includes(q)) continue;
+      out.push(m);
+    }
+    const dir = _sort.dir === 'asc' ? 1 : -1;
+    const col = _sort.col;
+    out.sort((a, b) => {
+      const av = a[col]; const bv = b[col];
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av ?? '').localeCompare(String(bv ?? '')) * dir;
+    });
+    return out;
+  }
+
   function renderCategoryPanel(cat) {
+    _activeCategory = cat;
     const main = document.getElementById('main');
     const models = cat.models || [];
     const available = models.filter((m) => m.state === 'available').length;
     const pending = models.filter((m) => m.state === 'pending').length;
     const sportLabel = cat.sportName || sportNameFor(cat.sportId) || '';
+    const brands = uniqueBrands(models);
 
     main.innerHTML = `
       <div class="crumbs">
@@ -239,114 +292,464 @@
       <h2 class="page-title">${escapeHtml(cat.fullName || cat.name)}</h2>
       <p class="page-sub">${models.length.toLocaleString()} models · ${available.toLocaleString()} available · ${pending.toLocaleString()} pending · synced ${formatRelative(cat.syncedAt)}</p>
 
-      <div class="toggle-row">
-        <span>Working on:</span>
-        <div class="pill-group" id="state-toggle">
-          <span class="pill active" data-state="available">Available</span>
-          <span class="pill" data-state="pending">Pending</span>
+      <div class="filter-toolbar">
+        <label class="filter-label">Brand
+          <select id="filter-brand">
+            <option value="all">All brands (${brands.length.toLocaleString()})</option>
+            ${brands.map((b) => `<option value="${escapeAttr(String(b.id))}">${escapeHtml(b.name)} (${b.count.toLocaleString()})</option>`).join('')}
+          </select>
+        </label>
+        <label class="filter-label">State
+          <div class="pill-group" id="state-toggle">
+            <span class="pill ${_filters.state === 'all' ? 'active' : ''}" data-state="all">All</span>
+            <span class="pill ${_filters.state === 'available' ? 'active' : ''}" data-state="available">Available</span>
+            <span class="pill ${_filters.state === 'pending' ? 'active' : ''}" data-state="pending">Pending</span>
+          </div>
+        </label>
+        <label class="filter-label flex">Search
+          <input type="search" id="filter-search" placeholder="model name…" value="${escapeAttr(_filters.search)}">
+        </label>
+      </div>
+
+      <div class="mode-toolbar">
+        <div class="pill-group" id="mode-toggle">
+          <span class="pill ${_mode === 'browse' ? 'active' : ''}" data-mode="browse">Browse</span>
+          <span class="pill ${_mode === 'merge' ? 'active' : ''}" data-mode="merge">Merge Mode</span>
+          <span class="pill ${_mode === 'rename' ? 'active' : ''}" data-mode="rename">Rename Mode</span>
         </div>
+        <div class="spacer"></div>
+        <button class="ghost" id="skill-merges">Find Merges</button>
+        <button class="ghost" id="skill-renames">Find Renames</button>
+        <button class="ghost" id="skill-conventions">Naming Conventions</button>
       </div>
 
-      <div class="skill-row">
-        <button class="skill-btn" id="skill-merges">
-          <div class="title">Find Merges</div>
-          <div class="desc">Cluster duplicates and propose which existing model each one folds into.</div>
-        </button>
-        <button class="skill-btn" id="skill-renames">
-          <div class="title">Find Renames</div>
-          <div class="desc">Propose canonical names for models that violate the brand's naming convention.</div>
-        </button>
-        <button class="skill-btn" id="skill-conventions">
-          <div class="title">Inspect Naming Conventions</div>
-          <div class="desc">Codify the naming pattern across this category's brands. Powers Find Renames.</div>
-        </button>
+      <div class="mode-hint" id="mode-hint"></div>
+
+      <div class="card model-table-wrap">
+        <div id="model-table-host"></div>
       </div>
 
-      <div class="card">
-        <h3>Brands in this category <span class="muted small">${countBy(models, (m) => m.brand_name || '(unknown)').length} total</span></h3>
-        <table class="list">
-          <thead><tr><th>Brand</th><th class="num">Available</th><th class="num">Pending</th><th class="num">Total</th></tr></thead>
-          <tbody>
-            ${brandRowsForCategory(models)}
-          </tbody>
-        </table>
-      </div>
+      <div class="merge-confirm-bar hidden" id="merge-confirm-bar"></div>
     `;
 
     main.querySelector('#back-to-grid').addEventListener('click', async () => {
       _activeCategoryId = null;
+      _activeCategory = null;
       localStorage.removeItem(ACTIVE_CATEGORY_KEY);
       await renderActive();
     });
 
-    const stateToggle = main.querySelector('#state-toggle');
-    stateToggle.addEventListener('click', (e) => {
+    main.querySelector('#filter-brand').addEventListener('change', (e) => {
+      _filters.brand = e.target.value;
+      renderModelTable();
+    });
+    main.querySelector('#state-toggle').addEventListener('click', (e) => {
       const t = e.target.closest('.pill');
       if (!t) return;
-      stateToggle.querySelectorAll('.pill').forEach((p) => p.classList.toggle('active', p === t));
+      _filters.state = t.getAttribute('data-state');
+      renderCategoryPanel(_activeCategory); // re-render to update active pill class
+    });
+    main.querySelector('#filter-search').addEventListener('input', (e) => {
+      _filters.search = e.target.value;
+      renderModelTable();
+    });
+
+    main.querySelector('#mode-toggle').addEventListener('click', (e) => {
+      const t = e.target.closest('.pill');
+      if (!t) return;
+      const next = t.getAttribute('data-mode');
+      setMode(next);
     });
 
     main.querySelector('#skill-merges').addEventListener('click', () => runFindMerges(cat));
     main.querySelector('#skill-renames').addEventListener('click', () => runFindRenames(cat));
     main.querySelector('#skill-conventions').addEventListener('click', () => runInspectConventions(cat));
+
+    renderModeHint();
+    renderModelTable();
+    renderMergeConfirmBar();
   }
 
-  function brandRowsForCategory(models) {
-    const byBrand = new Map();
-    for (const m of models) {
-      const k = m.brand_name || '(unknown)';
-      if (!byBrand.has(k)) byBrand.set(k, { name: k, brand_id: m.brand_id, available: 0, pending: 0 });
-      const v = byBrand.get(k);
-      if (m.state === 'available') v.available++;
-      else if (m.state === 'pending') v.pending++;
+  function uniqueBrands(models) {
+    const m = new Map();
+    for (const x of models) {
+      const id = x.brand_id;
+      if (id == null) continue;
+      if (!m.has(id)) m.set(id, { id, name: x.brand_name || `#${id}`, count: 0 });
+      m.get(id).count++;
     }
-    return Array.from(byBrand.values())
-      .sort((a, b) => (b.available + b.pending) - (a.available + a.pending))
-      .slice(0, 25)
-      .map((b) => `
-        <tr>
-          <td>${escapeHtml(b.name)}</td>
-          <td class="num">${b.available.toLocaleString()}</td>
-          <td class="num">${b.pending.toLocaleString()}</td>
-          <td class="num">${(b.available + b.pending).toLocaleString()}</td>
-        </tr>
-      `).join('');
+    return Array.from(m.values()).sort((a, b) => b.count - a.count);
   }
 
-  function activeStateFilter() {
-    const active = document.querySelector('#state-toggle .pill.active');
-    return active ? active.getAttribute('data-state') : 'available';
+  function setMode(mode) {
+    if (mode === _mode) return;
+    if (_mode === 'rename' && _renameEditingId != null) cancelRenameEdit();
+    _mode = mode;
+    _mergeSelection = { sourceId: null, targetId: null };
+    renderCategoryPanel(_activeCategory);
+  }
+
+  function renderModeHint() {
+    const el = document.getElementById('mode-hint');
+    if (!el) return;
+    if (_mode === 'merge') {
+      el.innerHTML = `<strong>Merge Mode.</strong> Click the duplicate model first (source), then the canonical model (target). Confirm at the bottom.`;
+      el.className = 'mode-hint mode-merge';
+    } else if (_mode === 'rename') {
+      el.innerHTML = `<strong>Rename Mode.</strong> Click any model name to edit it inline. Enter to save, Esc to cancel.`;
+      el.className = 'mode-hint mode-rename';
+    } else {
+      el.innerHTML = '';
+      el.className = 'mode-hint';
+    }
+  }
+
+  // -------- model table --------
+
+  const SORTABLE_COLS = ['name', 'brand_name', 'state', 'sold_count', 'last_90_sold_count', 'available_count'];
+
+  function renderModelTable() {
+    const host = document.getElementById('model-table-host');
+    if (!host) return;
+    const rows = filteredModels(_activeCategory);
+
+    if (!rows.length) {
+      host.innerHTML = `<div class="empty-state" style="margin: 16px;">
+        <strong>No models match.</strong> Adjust the filters above to see more.
+      </div>`;
+      return;
+    }
+
+    const head = (label, col) => {
+      const isSorted = _sort.col === col;
+      const arrow = isSorted ? (_sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      return `<th class="sortable" data-col="${col}">${label}${arrow}</th>`;
+    };
+
+    host.innerHTML = `
+      <table class="list model-table mode-${_mode}">
+        <thead><tr>
+          ${head('Name', 'name')}
+          ${head('Brand', 'brand_name')}
+          ${head('State', 'state')}
+          ${head('Sold', 'sold_count')}
+          ${head('Last 90', 'last_90_sold_count')}
+          ${head('Avail', 'available_count')}
+        </tr></thead>
+        <tbody>
+          ${rows.map(modelRow).join('')}
+        </tbody>
+      </table>
+      <div class="muted small" style="padding: 8px 14px;">${rows.length.toLocaleString()} of ${(_activeCategory.models || []).length.toLocaleString()} models</div>
+    `;
+
+    host.querySelectorAll('th.sortable').forEach((th) => {
+      th.addEventListener('click', () => {
+        const col = th.getAttribute('data-col');
+        if (!SORTABLE_COLS.includes(col)) return;
+        if (_sort.col === col) _sort.dir = _sort.dir === 'asc' ? 'desc' : 'asc';
+        else { _sort.col = col; _sort.dir = (col === 'name' || col === 'brand_name' || col === 'state') ? 'asc' : 'desc'; }
+        renderModelTable();
+      });
+    });
+
+    host.querySelectorAll('tr[data-model-id]').forEach((tr) => {
+      const id = Number(tr.getAttribute('data-model-id'));
+      tr.addEventListener('click', (e) => onRowClick(e, id));
+    });
+  }
+
+  function modelRow(m) {
+    const rowClasses = [];
+    if (_mode === 'merge') {
+      if (_mergeSelection.sourceId === m.id) rowClasses.push('row-source');
+      else if (_mergeSelection.targetId === m.id) rowClasses.push('row-target');
+    }
+    const stateBadge = m.state === 'available'
+      ? `<span class="tag available">Available</span>`
+      : `<span class="tag pending">Pending</span>`;
+    const nameCell = (_mode === 'rename' && _renameEditingId === m.id)
+      ? `<input class="rename-input" data-id="${m.id}" value="${escapeAttr(m.name || '')}">`
+      : `<span class="model-name${_mode === 'rename' ? ' editable' : ''}" data-id="${m.id}">${escapeHtml(m.name || '')}</span>`;
+    return `
+      <tr data-model-id="${m.id}" class="${rowClasses.join(' ')}">
+        <td>${nameCell}<div class="muted small mono">#${m.id}</div></td>
+        <td>${escapeHtml(m.brand_name || '—')}</td>
+        <td>${stateBadge}</td>
+        <td class="num">${(m.sold_count || 0).toLocaleString()}</td>
+        <td class="num">${(m.last_90_sold_count || 0).toLocaleString()}</td>
+        <td class="num">${(m.available_count || 0).toLocaleString()}</td>
+      </tr>
+    `;
+  }
+
+  function onRowClick(e, modelId) {
+    if (_mode === 'merge') {
+      handleMergeClick(modelId);
+      return;
+    }
+    if (_mode === 'rename') {
+      // Only the model-name span starts editing; clicks elsewhere on the row are ignored.
+      const nameEl = e.target.closest('.model-name.editable');
+      if (!nameEl) return;
+      startRenameEdit(modelId);
+      return;
+    }
+    // Browse mode: rows are passive.
+  }
+
+  // -------- Merge Mode --------
+
+  function handleMergeClick(modelId) {
+    if (_mergeSelection.sourceId == null) {
+      _mergeSelection.sourceId = modelId;
+    } else if (_mergeSelection.targetId == null) {
+      if (modelId === _mergeSelection.sourceId) {
+        // Same row clicked twice -- treat as cancel of source.
+        _mergeSelection.sourceId = null;
+      } else {
+        _mergeSelection.targetId = modelId;
+      }
+    } else {
+      // Both already set; new click resets to a fresh source.
+      _mergeSelection = { sourceId: modelId, targetId: null };
+    }
+    renderModelTable();
+    renderMergeConfirmBar();
+  }
+
+  function renderMergeConfirmBar() {
+    const bar = document.getElementById('merge-confirm-bar');
+    if (!bar) return;
+    if (_mode !== 'merge' || _mergeSelection.sourceId == null) {
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+      return;
+    }
+    const all = (_activeCategory && _activeCategory.models) || [];
+    const source = all.find((m) => m.id === _mergeSelection.sourceId);
+    const target = _mergeSelection.targetId != null ? all.find((m) => m.id === _mergeSelection.targetId) : null;
+    if (!source) {
+      _mergeSelection = { sourceId: null, targetId: null };
+      bar.classList.add('hidden');
+      return;
+    }
+    const ready = !!target;
+    bar.classList.remove('hidden');
+    bar.innerHTML = `
+      <div class="merge-confirm-text">
+        ${ready
+          ? `Merge <strong>${escapeHtml(source.name)}</strong> <span class="muted small">#${source.id}</span> &rarr; <strong>${escapeHtml(target.name)}</strong> <span class="muted small">#${target.id}</span>`
+          : `Source: <strong>${escapeHtml(source.name)}</strong> <span class="muted small">#${source.id}</span> &middot; <span class="muted">now click the target.</span>`}
+      </div>
+      <div class="spacer"></div>
+      <button class="ghost" id="merge-reset">Reset</button>
+      <button class="primary" id="merge-approve" ${ready ? '' : 'disabled'}>Approve</button>
+    `;
+    bar.querySelector('#merge-reset').addEventListener('click', () => {
+      _mergeSelection = { sourceId: null, targetId: null };
+      renderModelTable();
+      renderMergeConfirmBar();
+    });
+    if (ready) {
+      bar.querySelector('#merge-approve').addEventListener('click', () => approveManualMerge(source, target));
+    }
+  }
+
+  async function approveManualMerge(source, target) {
+    const cat = _activeCategory;
+    const entry = {
+      sourceId: source.id,
+      sourceName: source.name,
+      sportId: cat.sportId || null,
+      sportName: cat.sportName || sportNameFor(cat.sportId) || '',
+      categoryId: cat.id,
+      categoryFullName: cat.fullName || cat.name,
+      brandName: source.brand_name || '',
+      mergeTargetId: target.id,
+      mergeTargetName: target.name,
+      newName: null,
+      reasoning: 'Manual merge (operator)',
+    };
+    try {
+      await Storage.addSheetEntry(entry);
+      await Storage.recordDecision({
+        sourceId: source.id,
+        targetId: target.id,
+        newName: null,
+        decision: 'approved',
+        reasoning: entry.reasoning,
+      });
+    } catch (e) {
+      return toast('Failed to save: ' + e.message, 'error');
+    }
+    const sheetResult = await maybeAppendToSheet([entry]);
+    notifySheetResult(sheetResult, 1);
+    _mergeSelection = { sourceId: null, targetId: null };
+    await refreshSheetCount();
+    renderModelTable();
+    renderMergeConfirmBar();
+  }
+
+  // -------- Rename Mode --------
+
+  function startRenameEdit(modelId) {
+    if (_renameEditingId === modelId) return;
+    if (_renameEditingId != null) cancelRenameEdit();
+    _renameEditingId = modelId;
+    renderModelTable();
+    const input = document.querySelector(`.rename-input[data-id="${modelId}"]`);
+    if (!input) return;
+    input.focus();
+    input.select();
+    let confirmed = false;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        confirmed = true;
+        commitRenameEdit(modelId, input.value);
+      } else if (e.key === 'Escape') {
+        confirmed = true;
+        cancelRenameEdit();
+      }
+    });
+    input.addEventListener('blur', () => {
+      if (confirmed) return;
+      // Treat blur as commit if the value changed, cancel otherwise.
+      const m = (_activeCategory.models || []).find((x) => x.id === modelId);
+      const original = m ? m.name : '';
+      if ((input.value || '').trim() && input.value !== original) {
+        commitRenameEdit(modelId, input.value);
+      } else {
+        cancelRenameEdit();
+      }
+    });
+  }
+
+  function cancelRenameEdit() {
+    _renameEditingId = null;
+    renderModelTable();
+  }
+
+  async function commitRenameEdit(modelId, rawValue) {
+    const value = (rawValue || '').trim();
+    const m = (_activeCategory.models || []).find((x) => x.id === modelId);
+    if (!m) return cancelRenameEdit();
+    if (!value || value === m.name) {
+      _renameEditingId = null;
+      renderModelTable();
+      return;
+    }
+    const cat = _activeCategory;
+    const entry = {
+      sourceId: m.id,
+      sourceName: m.name,
+      sportId: cat.sportId || null,
+      sportName: cat.sportName || sportNameFor(cat.sportId) || '',
+      categoryId: cat.id,
+      categoryFullName: cat.fullName || cat.name,
+      brandName: m.brand_name || '',
+      mergeTargetId: null,
+      mergeTargetName: null,
+      newName: value,
+      reasoning: 'Manual rename (operator)',
+    };
+    try {
+      await Storage.addSheetEntry(entry);
+      await Storage.recordDecision({
+        sourceId: m.id,
+        targetId: null,
+        newName: value,
+        decision: 'approved',
+        reasoning: entry.reasoning,
+      });
+    } catch (e) {
+      toast('Failed to save: ' + e.message, 'error');
+      return cancelRenameEdit();
+    }
+    const sheetResult = await maybeAppendToSheet([entry]);
+    notifySheetResult(sheetResult, 1);
+    _renameEditingId = null;
+    await refreshSheetCount();
+    renderModelTable();
+  }
+
+  // -------- Sheets append (shared with proposal modal + manual modes) --------
+
+  function buildCsvRowFromEntry(e) {
+    const row = Object.fromEntries(BULK_IMPORT_HEADERS.map((h) => [h, '']));
+    row.model_id = e.sourceId;
+    // Merges supersede renames: drop the rename if both are set.
+    if (e.mergeTargetId) {
+      row.merge_target_id = e.mergeTargetId;
+    } else if (e.newName) {
+      row.name = e.newName;
+    }
+    return row;
+  }
+
+  function buildCsvValuesFromEntry(e) {
+    const r = buildCsvRowFromEntry(e);
+    return BULK_IMPORT_HEADERS.map((h) => r[h] ?? '');
+  }
+
+  // Returns { skipped: true } | { ok: true } | { error: string }
+  async function maybeAppendToSheet(entries) {
+    if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) {
+      return { skipped: true };
+    }
+    if (!entries || !entries.length) return { skipped: true };
+    const rows = entries.map(buildCsvValuesFromEntry);
+    try {
+      await Sheets.appendRows(rows);
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  }
+
+  function notifySheetResult(result, count) {
+    if (result.ok) toast(`Added ${count} row(s) to the bound Google Sheet.`, 'ok');
+    else if (result.error) toast(`Saved locally; Sheets append failed: ${result.error}`, 'error');
   }
 
   // -------- skill: find merges --------
 
   async function runFindMerges(cat) {
-    const stateFilter = activeStateFilter();
-    const models = cat.models || [];
-    if (!models.length) return toast('No models in this category.', 'error');
+    const models = filteredModels(cat);
+    if (!models.length) return toast('No models match the current filters.', 'error');
+    const totalCount = (cat.models || []).length;
+    const filterNote = models.length === totalCount ? '' : ` (filtered: ${models.length.toLocaleString()} of ${totalCount.toLocaleString()})`;
 
     const grouped = Proposals.groupByBrandCategory(models);
-    openProposalModal('Finding merges...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Clustering ${models.length.toLocaleString()} models across ${grouped.length} brands...</div>`);
+    openProposalModal('Finding merges...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Clustering ${models.length.toLocaleString()} models across ${grouped.length} brands${escapeHtml(filterNote)}...</div>`);
 
     let allProposals = [];
     let allRejections = [];
+    const allFailures = [];
     try {
       for (const g of grouped) {
-        const filtered = g.models.filter((m) => m.state === stateFilter || m.state === 'available');
         const result = await Proposals.proposeMerges({
           brandName: g.brandName,
           categoryFullName: g.categoryFullName,
-          models: filtered,
+          models: g.models,
           onProgress: (p) => {
             updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}`);
           },
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
+        if (result.failedBatches && result.failedBatches.length) {
+          allFailures.push({ brandName: g.brandName, count: result.failedBatches.length, sample: result.failedBatches[0].error });
+        }
       }
     } catch (e) {
       closeModal('proposal-modal');
       return toast('Merge proposal failed: ' + e.message, 'error');
+    }
+
+    if (allFailures.length) {
+      const total = allFailures.reduce((s, f) => s + f.count, 0);
+      toast(`${total} batch(es) failed across ${allFailures.length} brand(s). First error: ${allFailures[0].sample}`, 'error');
     }
 
     _proposalState = {
@@ -367,9 +770,8 @@
   // -------- skill: find renames --------
 
   async function runFindRenames(cat) {
-    const stateFilter = activeStateFilter();
-    const models = cat.models || [];
-    if (!models.length) return toast('No models in this category.', 'error');
+    const models = filteredModels(cat);
+    if (!models.length) return toast('No models match the current filters.', 'error');
 
     const grouped = Proposals.groupByBrandCategory(models);
     openProposalModal('Finding renames...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Checking ${grouped.length} brands against saved conventions...</div>`);
@@ -377,6 +779,7 @@
     let allProposals = [];
     let allRejections = [];
     let missingConvention = [];
+    const allFailures = [];
     try {
       for (const g of grouped) {
         const conv = await Storage.loadConvention(g.brandId, g.categoryId);
@@ -384,22 +787,29 @@
           missingConvention.push(g.brandName);
           continue;
         }
-        const filtered = g.models.filter((m) => m.state === stateFilter);
         const result = await Proposals.proposeRenames({
           brandName: g.brandName,
           brandId: g.brandId,
           categoryFullName: g.categoryFullName,
           categoryId: g.categoryId,
-          models: filtered,
+          models: g.models,
           convention: conv,
           onProgress: (p) => updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}`),
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
+        if (result.failedBatches && result.failedBatches.length) {
+          allFailures.push({ brandName: g.brandName, count: result.failedBatches.length, sample: result.failedBatches[0].error });
+        }
       }
     } catch (e) {
       closeModal('proposal-modal');
       return toast('Rename proposal failed: ' + e.message, 'error');
+    }
+
+    if (allFailures.length) {
+      const total = allFailures.reduce((s, f) => s + f.count, 0);
+      toast(`${total} batch(es) failed across ${allFailures.length} brand(s). First error: ${allFailures[0].sample}`, 'error');
     }
 
     _proposalState = {
@@ -601,8 +1011,9 @@
     const approved = _proposalState.items.filter((i) => i.action === 'approve');
     const rejected = _proposalState.items.filter((i) => i.action === 'reject');
 
+    const approvedEntries = [];
     for (const it of approved) {
-      await Storage.addSheetEntry({
+      const entry = {
         sourceId: it.source_id,
         sourceName: it.source_name,
         sportId: _proposalState.sportId,
@@ -614,7 +1025,8 @@
         mergeTargetName: isMerge ? it.target_name : null,
         newName: !isMerge ? it.new_name : null,
         reasoning: it.reasoning || '',
-      });
+      };
+      await Storage.addSheetEntry(entry);
       await Storage.recordDecision({
         sourceId: it.source_id,
         targetId: isMerge ? it.target_id : null,
@@ -622,6 +1034,7 @@
         decision: 'approved',
         reasoning: it.reasoning,
       });
+      approvedEntries.push(entry);
     }
     for (const it of rejected) {
       await Storage.recordDecision({
@@ -635,6 +1048,10 @@
     closeModal('proposal-modal');
     await refreshSheetCount();
     toast(`Added ${approved.length} to sheet, recorded ${rejected.length} rejections.`, 'ok');
+    if (approvedEntries.length) {
+      const sheetResult = await maybeAppendToSheet(approvedEntries);
+      notifySheetResult(sheetResult, approvedEntries.length);
+    }
   }
 
   // -------- sync overlay --------
@@ -962,33 +1379,13 @@
     const entries = await Storage.listSheetEntries();
     if (!entries.length) return toast('Sheet is empty.', 'error');
 
-    const headers = [
-      'model_id', 'description', 'position', 'primary_image_url', 'secondary_image_url',
-      'state', 'merge_target_id', 'category_id', 'name', 'brand_id', 'synonyms',
-      'price_retail', 'gtin', 'mpn', 'line', 'importance', 'expert_pick',
-      'value_guides_start_date', 'detail_ids',
-    ];
-
-    const rows = [];
-    let droppedRenames = 0;
-    for (const e of entries) {
-      const row = Object.fromEntries(headers.map((h) => [h, '']));
-      row.model_id = e.sourceId;
-      if (e.mergeTargetId && e.newName) {
-        droppedRenames++;
-        row.merge_target_id = e.mergeTargetId;
-      } else if (e.mergeTargetId) {
-        row.merge_target_id = e.mergeTargetId;
-      } else if (e.newName) {
-        row.name = e.newName;
-      }
-      rows.push(row);
-    }
+    const droppedRenames = entries.filter((e) => e.mergeTargetId && e.newName).length;
+    const rows = entries.map(buildCsvRowFromEntry);
     if (droppedRenames > 0) {
       toast(`${droppedRenames} row(s) had both a merge and a rename — the rename was dropped (merges supersede).`, 'error');
     }
 
-    const csv = Papa.unparse({ fields: headers, data: rows });
+    const csv = Papa.unparse({ fields: BULK_IMPORT_HEADERS, data: rows });
     // Filename uses the dominant sport of sheet entries when available, otherwise
     // 'merch'. (Sheet entries inherit sportName from the originating category.)
     const sportTag = entries.find((e) => e.sportName)?.sportName?.toLowerCase().replace(/\s+/g, '-') || 'merch';
@@ -1074,6 +1471,68 @@
   }
   function escapeAttr(s) {
     return escapeHtml(s).replaceAll('"', '&quot;');
+  }
+
+  // -------- Settings modal: Google Sheets connector --------
+
+  function openSettingsModal() {
+    openModal('settings-modal');
+    renderSettingsBody();
+  }
+
+  function renderSettingsBody() {
+    const connected = global.Sheets && Sheets.isConnected();
+    const binding = global.Sheets ? Sheets.loadBinding() : null;
+    document.getElementById('google-status').innerHTML = connected
+      ? `<span class="tag available">Connected</span>`
+      : `<span class="tag pending">Not connected</span>`;
+    document.getElementById('connect-google').disabled = !!connected;
+    document.getElementById('disconnect-google').disabled = !connected;
+    document.getElementById('create-sheet').disabled = !connected;
+
+    const bindingEl = document.getElementById('sheet-binding');
+    if (binding) {
+      bindingEl.innerHTML = `
+        <div><strong>${escapeHtml(binding.title || 'Sheet')}</strong></div>
+        <div class="muted small"><a href="${escapeAttr(binding.url)}" target="_blank" rel="noopener">${escapeHtml(binding.url)}</a></div>
+        <div class="muted small">Created ${formatRelative(binding.createdAt)}.</div>
+      `;
+    } else {
+      bindingEl.innerHTML = `<span class="muted small">No Sheet bound. Connect Google, then click <strong>Create Sheet</strong> to make a new bulk-import sheet.</span>`;
+    }
+  }
+
+  async function connectGoogleSheets() {
+    if (!global.Sheets) return toast('Sheets module unavailable.', 'error');
+    try {
+      await Sheets.startAuth();
+      toast('Connected to Google.', 'ok');
+    } catch (e) {
+      toast('Connect failed: ' + e.message, 'error');
+    }
+    renderSettingsBody();
+  }
+
+  function disconnectGoogleSheets() {
+    if (!global.Sheets) return;
+    showConfirm('Disconnect Google Sheets?', 'This clears the stored Google tokens and the bound sheet id. Your Sheet itself is untouched.', () => {
+      Sheets.disconnect();
+      toast('Disconnected.', 'ok');
+      renderSettingsBody();
+    });
+  }
+
+  async function createGoogleSheet() {
+    if (!global.Sheets || !Sheets.isConnected()) return toast('Connect to Google first.', 'error');
+    const titleInput = document.getElementById('sheet-title');
+    const title = (titleInput.value || '').trim() || `SidelineSwap Merch — ${new Date().toISOString().slice(0, 10)}`;
+    try {
+      const result = await Sheets.createSheet({ title, headerRow: BULK_IMPORT_HEADERS });
+      toast(`Sheet created: ${result.url}`, 'ok');
+    } catch (e) {
+      toast('Create failed: ' + e.message, 'error');
+    }
+    renderSettingsBody();
   }
 
   global.Dashboard = { init };
