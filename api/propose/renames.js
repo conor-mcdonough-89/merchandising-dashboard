@@ -9,8 +9,11 @@ const SYSTEM_PROMPT = `You are a catalog naming assistant for SidelineSwap. Your
 
 You will receive:
 - A brand and category
-- The naming convention for this brand+category (pattern, examples, rules, exceptions)
+- The brand+category naming convention (pattern, examples, rules, exceptions)
+- A category-level convention that applies to every brand in this category (rules and exceptions only)
 - A list of candidate models with non-conforming names
+
+Convention precedence: the brand convention wins when it conflicts with the category convention. The category convention applies whenever the brand doesn't specify a rule on the same point. Use both together.
 
 For each candidate, propose either a canonical name that follows the convention, or refuse with a reason.
 
@@ -38,13 +41,16 @@ Return JSON only matching this exact shape:
 
 Every candidate in the input MUST appear in either proposals or rejections. Do not invent ids.`;
 
-function buildUserMessage({ brand_name, category_full_name, convention, candidates, gold_models }) {
+function buildUserMessage({ brand_name, category_full_name, convention, category_convention, candidates, gold_models }) {
   return [
     `Brand: ${brand_name}`,
     `Category: ${category_full_name}`,
     '',
-    `Naming convention for this brand+category:`,
-    JSON.stringify(convention || { note: 'No convention provided — infer from gold models below.' }, null, 2),
+    `Brand+category naming convention:`,
+    JSON.stringify(convention || { note: 'No brand convention provided — infer from gold models below.' }, null, 2),
+    '',
+    `Category-level convention (applies to every brand in this category):`,
+    JSON.stringify(category_convention || { note: 'No category-level convention set.' }, null, 2),
     '',
     `Gold-standard models (reference for canonical naming, ${(gold_models || []).length}):`,
     JSON.stringify(gold_models || [], null, 2),

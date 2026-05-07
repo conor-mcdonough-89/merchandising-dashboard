@@ -10,6 +10,8 @@
 //   /api/google/auth-callback      -> api/google/auth-callback.js handler
 //   /api/google/sheets-create      -> api/google/sheets-create.js handler
 //   /api/google/sheets-append      -> api/google/sheets-append.js handler
+//   /api/conventions/list          -> api/conventions/list.js handler
+//   /api/conventions/upsert        -> api/conventions/upsert.js handler
 //
 // Requires Node ≥18 (uses globalThis.fetch).
 //
@@ -187,6 +189,8 @@ const EDGE_ROUTES = [
   { path: '/api/google/auth-callback',    module: './api/google/auth-callback.js' },
   { path: '/api/google/sheets-create',    module: './api/google/sheets-create.js' },
   { path: '/api/google/sheets-append',    module: './api/google/sheets-append.js' },
+  { path: '/api/conventions/list',        module: './api/conventions/list.js' },
+  { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
 ];
 
 const _edgeCache = new Map();
@@ -230,5 +234,8 @@ server.listen(PORT, () => {
   if (!process.env.ANTHROPIC_API_KEY) console.log('  (ANTHROPIC_API_KEY not set — propose endpoints will return 500)');
   if (!process.env.GOOGLE_OAUTH_CLIENT_ID || !process.env.GOOGLE_OAUTH_CLIENT_SECRET || !process.env.GOOGLE_OAUTH_REDIRECT_URI) {
     console.log('  (GOOGLE_OAUTH_* not set — Google Sheets connector will return 500)');
+  }
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.log('  (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY not set — conventions endpoints will return 500)');
   }
 });

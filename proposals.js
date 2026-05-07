@@ -79,7 +79,7 @@
     return { proposals: allProposals, rejections: allRejections, batches: batches.length, failedBatches };
   }
 
-  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, onProgress }) {
+  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, categoryConvention, onProgress }) {
     const rejected = await Storage.getRejections();
     const conv = convention || (brandId != null ? await Storage.loadConvention(brandId, categoryId) : null);
     const goldModels = Clustering.selectGoldModels(models);
@@ -97,6 +97,7 @@
           brand_name: brandName,
           category_full_name: categoryFullName,
           convention: conv,
+          category_convention: categoryConvention || null,
           gold_models: goldModels,
           candidates: batches[i],
         });

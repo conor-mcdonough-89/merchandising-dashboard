@@ -796,6 +796,62 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .convention-card div { margin: 4px 0; font-family: 'DM Mono', monospace; font-size: 11px; }
 .convention-card div strong { color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 500; font-size: 10px; }
+.convention-card.category-scope {
+  border-color: rgba(74, 143, 232, 0.5);
+  background: rgba(74, 143, 232, 0.05);
+}
+.convention-card .card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.convention-card .card-actions .btn-save { margin-left: auto; }
+.convention-card .card-actions.edit-actions { justify-content: flex-end; }
+
+.conv-editor { margin-top: 4px; }
+.conv-editor .conv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.conv-editor .conv-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+.conv-editor input,
+.conv-editor textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  width: 100%;
+  resize: vertical;
+}
+.conv-editor input:focus,
+.conv-editor textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.convention-banner {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.convention-banner.warn {
+  background: rgba(232, 196, 74, 0.06);
+  border: 1px solid rgba(232, 196, 74, 0.4);
+  color: #e8c44a;
+}
 
 /* ─── Toast ─── */
 .toast-wrap {

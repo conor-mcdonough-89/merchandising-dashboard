@@ -23,11 +23,12 @@ to the catalog.
 | `sheets.js` | Google Sheets client (browser-side). PKCE OAuth popup flow, token storage in localStorage, `Sheets.startAuth`, `Sheets.disconnect`, `Sheets.isConnected`, `Sheets.loadBinding`, `Sheets.createSheet`, `Sheets.appendRows`. All HTTP through `/api/google/*`. |
 | `clustering.js` | Pure compute. `Clustering.findMergeCandidates(models)`, `Clustering.findRenameCandidates(models, convention)`, `Clustering.jaroWinkler(a, b)`, `Clustering.tokenSetOverlap(a, b)`, `Clustering.selectGoldModels(models)`, `Clustering.packClusterBatches(...)`. |
 | `proposals.js` | Client-side LLM orchestrator. `Proposals.proposeMerges`, `Proposals.proposeRenames`, `Proposals.inferConvention`. Batches large slices and filters previously-rejected source ids. |
-| `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
+| `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. The `conventions` store is a read-through cache for the Supabase backend; brand records key on `${brandId}::${categoryId}`, category records on `category::${categoryId}`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `saveCategoryConvention`, `loadCategoryConvention`, `listConventionsForCategory`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
 | `style.css` | Hand-written dark theme. Variables in `:root`. No frameworks. |
 | `api/metabase-proxy.js` | Vercel Edge Function. Streams `/api/metabase/*` to `${METABASE_URL}/*`. Pass-through for body and headers. |
 | `api/anthropic.js` | Shared Anthropic API helper. Holds the model-id constants `SONNET_MODEL` and `OPUS_MODEL` so swaps happen in one place. Validates `ANTHROPIC_API_KEY`. |
 | `api/google.js` | Shared Google OAuth + Sheets helper. PKCE token exchange, refresh, `spreadsheets.create`, `values.append`. Validates `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI`. |
+| `api/supabase.js` | Shared Supabase helper. `supabaseFetch` adds the `apikey` + `Authorization` headers and forwards to PostgREST. Validates `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`. |
 | `api/propose/merges.js` | Edge Function. POST → calls Anthropic (Sonnet) with the merge system prompt → returns JSON. |
 | `api/propose/renames.js` | Edge Function. POST → calls Anthropic (Sonnet) with the rename system prompt → returns JSON. |
 | `api/propose/conventions.js` | Edge Function. POST → calls Anthropic (Opus) with the convention system prompt → returns JSON. |
@@ -37,6 +38,8 @@ to the catalog.
 | `api/google/auth-callback.js` | Edge Function. HTML response that `postMessage`s the auth code back to the opener and closes itself. |
 | `api/google/sheets-create.js` | Edge Function. POST `{ access_token, title, headerRow }` → creates a new spreadsheet, writes the bulk-import header row, returns `{ sheetId, url }`. |
 | `api/google/sheets-append.js` | Edge Function. POST `{ access_token, sheetId, rows }` → appends rows. |
+| `api/conventions/list.js` | Edge Function. GET `?categoryId=37` → returns `{ category, brands }` for that category from Supabase. |
+| `api/conventions/upsert.js` | Edge Function. POST a category or brand convention → upserts into Supabase, returns the written row. |
 | `server.js` | Zero-dep Node fallback for self-hosting. Serves the static SPA and mirrors the Edge Functions. Node ≥18. |
 | `vercel.json` | Rewrites: `/api/metabase/:path*` → `/api/metabase-proxy?p=:path*`, plus the three propose endpoints and the six Google endpoints. |
 | `package.json` | No deps. `"type": "module"`. `npm start` runs `server.js`. |
@@ -201,10 +204,20 @@ For each brand with a saved convention:
 
 ### 4. Inspect Naming Conventions
 
-`Inspect Naming Conventions` opens a per-brand list. Click **Infer / Refresh** on a
-brand to call `/api/propose/conventions` (Opus) with that brand's gold models. The
-returned writeup ({ pattern, examples, rules, exceptions }) is saved to IndexedDB and
-re-used by Find Renames.
+`Naming Conventions` opens a modal with two scopes of card:
+
+- **Category card** at the top — handwritten only, applies to every brand in the
+  category. Click **Edit** → fill pattern / rules / exceptions in textareas →
+  **Save**. Powers the `category_convention` field in Find Renames.
+- **Brand cards** below, one per brand in the category. Click **Infer / Refresh**
+  to call `/api/propose/conventions` (Opus) with that brand's gold models —
+  the returned `{ pattern, examples, rules, exceptions }` populates the card and
+  is upserted via `/api/conventions/upsert`. **Edit** lets the operator fix the
+  ~1-2 lines per inference that are usually wrong.
+
+Both cards persist to **Supabase** via `/api/conventions/upsert`; IndexedDB is a
+read-through cache so the modal still renders when the backend is down (with a
+"using cached conventions" banner and Save disabled).
 
 ### 5. The category panel (model table + modes)
 
@@ -335,6 +348,62 @@ the entry stays in IndexedDB for CSV export.
 
 ---
 
+## Conventions backend (Supabase)
+
+Naming conventions are shared across operators via Supabase. `api/conventions/*`
+holds the only writes; the browser only ever talks to those endpoints, never
+directly to Supabase. IndexedDB is a read-through cache: every successful list
+or upsert mirrors locally so the modal can render without a round-trip and
+operators get a functional offline read path.
+
+### Schema
+
+```sql
+create table conventions (
+  key                 text primary key,            -- "category::37" or "290::37"
+  scope               text not null,               -- 'category' | 'brand'
+  brand_id            integer,                     -- null for scope='category'
+  brand_name          text,
+  category_id         integer not null,
+  category_full_name  text not null,
+  pattern             text default '',
+  examples            jsonb default '[]'::jsonb,
+  rules               jsonb default '[]'::jsonb,
+  exceptions          jsonb default '[]'::jsonb,
+  inferred_at         timestamptz,
+  edited_at           timestamptz,
+  updated_at          timestamptz default now()
+);
+create index conventions_category_idx on conventions (category_id);
+```
+
+No RLS in v1 — the dashboard's password gate is the only auth boundary, and
+the service-role key never leaves the Edge Function. `edited_by` deferred
+until we have operator identity.
+
+### Endpoints
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `GET /api/conventions/list?categoryId=37` | GET | Returns `{ category, brands }` for that category. |
+| `POST /api/conventions/upsert` | POST | `{ scope, brandId?, brandName?, categoryId, categoryFullName, pattern, examples, rules, exceptions, inferredAt? }` → upserts via PostgREST `Prefer: resolution=merge-duplicates`. |
+
+### Required env vars
+
+- `SUPABASE_URL` — e.g. `https://abcd.supabase.co`.
+- `SUPABASE_SERVICE_ROLE_KEY` — server-only; never returned to the browser.
+
+### Find Renames integration
+
+`runFindRenames` (`dashboard.js`) prefetches `/api/conventions/list` once at
+the start of a run, then loops brands using the prefetched map. Each batch
+call to `/api/propose/renames` includes both `convention` (brand) and
+`category_convention` (one per category). The renames system prompt at
+`api/propose/renames.js` instructs the LLM that brand convention wins on
+conflict; category convention applies elsewhere.
+
+---
+
 ## Deployment
 
 ### Vercel
@@ -344,6 +413,7 @@ the entry stays in IndexedDB for CSV export.
    - `METABASE_URL` (e.g., `https://metabase.example.com`)
    - `ANTHROPIC_API_KEY` (from console.anthropic.com)
    - `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` (from console.cloud.google.com)
+   - `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (from supabase.com → Project Settings → API)
 3. Apply to Production and Preview, then redeploy.
 4. The Edge Functions handle `/api/metabase/*` and `/api/propose/*` per `vercel.json`.
 
@@ -355,11 +425,14 @@ ANTHROPIC_API_KEY=sk-ant-... \
 GOOGLE_OAUTH_CLIENT_ID=... \
 GOOGLE_OAUTH_CLIENT_SECRET=... \
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/auth-callback \
+SUPABASE_URL=https://abcd.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi... \
 PORT=8080 npm start
 ```
 
 Google OAuth env vars are optional — without them the Sheets connector returns
-500s but the rest of the app works.
+500s but the rest of the app works. Supabase env vars are also optional — the
+convention modal will fall back to its IndexedDB cache.
 
 `server.js` serves the static SPA from the project root and mounts the same routes
 the Edge Functions cover. Requires Node ≥18.
@@ -377,7 +450,13 @@ the Edge Functions cover. Requires Node ≥18.
 - **Re-sync a category.** Click the **↻** icon in the top-right of a category tile.
 - **Re-run conventions for a brand+category.** In the category panel, click
   **Naming Conventions** → click **Infer / Refresh** on the brand. Overwrites
-  the saved convention.
+  the saved convention in Supabase.
+- **Edit a brand convention.** Same modal → click **Edit** on the card → fix
+  the rule that came out wrong → **Save**. Persists to Supabase.
+- **Add a category-level convention.** Same modal → category card at the top
+  → **Edit** → write category-wide rules (e.g. "Bat names always end with the
+  material") → **Save**. Find Renames feeds it to the LLM alongside each brand
+  convention.
 - **Manually merge two models.** Open the category panel → switch to **Merge
   Mode** → click the duplicate (source) → click the canonical model (target) →
   **Approve**. Selection clears and Merge Mode stays on for the next pair.
@@ -456,6 +535,11 @@ the Edge Functions cover. Requires Node ≥18.
 - **Google client_secret is server-only.** The browser only ever sees
   `client_id`. PKCE is used so the auth code is bound to the originating
   session.
+- **Conventions: Supabase is source of truth, IndexedDB is a cache.** Reads
+  go through `/api/conventions/list` and mirror locally. Writes go through
+  `/api/conventions/upsert`; on failure the cache is *not* updated so it stays
+  consistent with the server. Last-write-wins between operators — no
+  optimistic concurrency in v1.
 
 ---
 
