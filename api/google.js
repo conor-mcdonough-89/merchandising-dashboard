@@ -106,13 +106,19 @@ export async function createSpreadsheet({ access_token, title, headerRow }) {
   const created = await createRes.json();
   const sheetId = created.spreadsheetId;
   const url = created.spreadsheetUrl;
+  // Worksheet gid -- needed by spreadsheets.batchUpdate's range.sheetId field
+  // for cell-level formatting. Sheets we create always have a single sheet so
+  // [0] is the right tab.
+  const gid = created.sheets && created.sheets[0] && created.sheets[0].properties
+    ? created.sheets[0].properties.sheetId
+    : 0;
 
   // Step 2: write the header row.
   if (Array.isArray(headerRow) && headerRow.length) {
     await appendValues({ access_token, sheetId, rows: [headerRow] });
   }
 
-  return { sheetId, url };
+  return { sheetId, url, gid };
 }
 
 export async function appendValues({ access_token, sheetId, rows }) {
@@ -129,6 +135,73 @@ export async function appendValues({ access_token, sheetId, rows }) {
   if (!res.ok) {
     const text = await res.text();
     const err = new Error(`Sheets append ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  // Returns { spreadsheetId, tableRange?, updates: { updatedRange, updatedRows, ... } }
+  // updates.updatedRange is the per-call range we stash on the IndexedDB entry
+  // so subsequent edits target the same row via updateValues below.
+  return res.json();
+}
+
+// Overwrite a previously-appended row in place. `range` is the A1 range that
+// `appendValues` returned (e.g. "Sheet1!A4:S4"); `row` is the full 19-column
+// values array. valueInputOption=RAW so we don't re-interpret cell contents.
+export async function updateValues({ access_token, sheetId, range, row }) {
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'authorization': `Bearer ${access_token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets update ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// Apply cell formatting via spreadsheets.batchUpdate. Pass an array of
+// repeatCell-shaped requests built by the caller (the dashboard composes them
+// from changed column indices + the row range it stashed on the entry).
+export async function batchUpdate({ access_token, sheetId, requests }) {
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}:batchUpdate`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${access_token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ requests }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets batchUpdate ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// Read a range of cell values via spreadsheets.values.get. Used to pull the
+// model_id column out of the bound Sheet so we can flag models another
+// operator has already queued.
+export async function readValues({ access_token, sheetId, range }) {
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}/values/${encodeURIComponent(range)}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'authorization': `Bearer ${access_token}`,
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets read ${res.status}: ${text.slice(0, 400)}`);
     err.status = res.status;
     throw err;
   }

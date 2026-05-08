@@ -211,10 +211,24 @@
   }
 
   // -------- sheet (in-progress bulk import) --------
+  // Read-modify-write so layered actions (state change + rename, etc.) merge
+  // into one record per sourceId instead of overwriting. Callers should pass
+  // only the fields they're actually setting -- nulls would clear unrelated
+  // layered actions.
   async function addSheetEntry(entry) {
     const store = await tx('sheet', 'readwrite');
-    const enriched = { ...entry, addedAt: entry.addedAt || new Date().toISOString() };
-    return promisify(store.put(enriched));
+    const existing = await promisify(store.get(entry.sourceId));
+    const merged = {
+      ...(existing || {}),
+      ...entry,
+      addedAt:   (existing && existing.addedAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    return promisify(store.put(merged));
+  }
+  async function loadSheetEntry(sourceId) {
+    const store = await tx('sheet', 'readonly');
+    return promisify(store.get(sourceId));
   }
   async function removeSheetEntry(sourceId) {
     const store = await tx('sheet', 'readwrite');
@@ -236,6 +250,6 @@
     saveCategoryConvention, loadCategoryConvention, categoryConventionKey,
     listConventionsForCategory,
     recordDecision, getRejections, clearExpiredDecisions,
-    addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
+    addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
   };
 })(window);
