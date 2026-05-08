@@ -736,6 +736,7 @@
     await syncEntryToSheet(m.id);
     _renameEditingId = null;
     await refreshSheetCount();
+    await refreshSheetSourceSets();
     renderModelTable();
   }
 
@@ -834,6 +835,7 @@
     }
     await syncEntryToSheet(model.id);
     await refreshSheetCount();
+    await refreshSheetSourceSets();
     renderModelTable();
   }
 
