@@ -13,6 +13,7 @@
 //   /api/google/sheets-update      -> api/google/sheets-update.js handler
 //   /api/google/sheets-format      -> api/google/sheets-format.js handler
 //   /api/google/sheets-read        -> api/google/sheets-read.js handler
+//   /api/google/sheets-meta        -> api/google/sheets-meta.js handler
 //   /api/conventions/list          -> api/conventions/list.js handler
 //   /api/conventions/upsert        -> api/conventions/upsert.js handler
 //
@@ -195,6 +196,7 @@ const EDGE_ROUTES = [
   { path: '/api/google/sheets-update',    module: './api/google/sheets-update.js' },
   { path: '/api/google/sheets-format',    module: './api/google/sheets-format.js' },
   { path: '/api/google/sheets-read',      module: './api/google/sheets-read.js' },
+  { path: '/api/google/sheets-meta',      module: './api/google/sheets-meta.js' },
   { path: '/api/conventions/list',        module: './api/conventions/list.js' },
   { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
 ];

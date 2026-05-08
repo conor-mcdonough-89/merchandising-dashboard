@@ -24,7 +24,7 @@ to the catalog.
 | `clustering.js` | Pure compute. `Clustering.findMergeCandidates(models)`, `Clustering.findRenameCandidates(models, convention)`, `Clustering.jaroWinkler(a, b)`, `Clustering.tokenSetOverlap(a, b)`, `Clustering.selectGoldModels(models)`, `Clustering.packClusterBatches(...)`. |
 | `proposals.js` | Client-side LLM orchestrator. `Proposals.proposeMerges`, `Proposals.proposeRenames`, `Proposals.inferConvention`. Batches large slices and filters previously-rejected source ids. |
 | `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. The `conventions` store is a read-through cache for the Supabase backend; brand records key on `${brandId}::${categoryId}`, category records on `category::${categoryId}`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `saveCategoryConvention`, `loadCategoryConvention`, `listConventionsForCategory`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
-| `style.css` | Hand-written dark theme. Variables in `:root`. No frameworks. |
+| `style.css` | Hand-written light theme. Variables in `:root`. No frameworks. |
 | `api/metabase-proxy.js` | Vercel Edge Function. Streams `/api/metabase/*` to `${METABASE_URL}/*`. Pass-through for body and headers. |
 | `api/anthropic.js` | Shared Anthropic API helper. Holds the model-id constants `SONNET_MODEL` and `OPUS_MODEL` so swaps happen in one place. Validates `ANTHROPIC_API_KEY`. |
 | `api/google.js` | Shared Google OAuth + Sheets helper. PKCE token exchange, refresh, `spreadsheets.create`, `values.append`. Validates `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI`. |
@@ -41,6 +41,7 @@ to the catalog.
 | `api/google/sheets-update.js` | Edge Function. POST `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. Used when a previously-synced model gets a layered action. |
 | `api/google/sheets-format.js` | Edge Function. POST `{ access_token, sheetId, requests }` → applies cell formatting via `spreadsheets.batchUpdate`. Used to yellow-highlight cells the operator's action changed. |
 | `api/google/sheets-read.js` | Edge Function. POST `{ access_token, sheetId, range }` → reads cell values via `spreadsheets.values.get`. Used to pull column A (model_ids) for the cross-operator pending signifier. |
+| `api/google/sheets-meta.js` | Edge Function. POST `{ access_token, sheetId }` → `spreadsheets.get` (fields-narrowed to `sheets.properties.sheetId,sheets.properties.title`). Used to backfill the worksheet `gid` for bindings that don't have one. |
 | `api/conventions/list.js` | Edge Function. GET `?categoryId=37` → returns `{ category, brands }` for that category from Supabase. |
 | `api/conventions/upsert.js` | Edge Function. POST a category or brand convention → upserts into Supabase, returns the written row. |
 | `server.js` | Zero-dep Node fallback for self-hosting. Serves the static SPA and mirrors the Edge Functions. Node ≥18. |
@@ -370,6 +371,7 @@ server-side; tokens live in browser localStorage.
 | `POST /api/google/sheets-update` | POST | `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. |
 | `POST /api/google/sheets-format` | POST | `{ access_token, sheetId, requests }` → `spreadsheets.batchUpdate` with `repeatCell` requests. Yellow-highlights the cells operator actions changed. |
 | `POST /api/google/sheets-read`   | POST | `{ access_token, sheetId, range }` → `spreadsheets.values.get`. Used to pull column A (model_ids) for the cross-operator pending signifier. |
+| `POST /api/google/sheets-meta`   | POST | `{ access_token, sheetId }` → `spreadsheets.get`. Returns `{ gid, title }` for the first worksheet so older bindings can backfill `gid` before a formatting call. |
 
 ### Required env vars
 
@@ -391,9 +393,10 @@ Drive metadata.
 - `localStorage['merch-sheets-binding']` = `{ sheetId, url, gid, title, createdAt }`.
   `gid` is the worksheet's numeric tab id (from `spreadsheets.create` response
   `sheets[0].properties.sheetId`); needed by `spreadsheets.batchUpdate` for
-  cell-level formatting. Pre-existing bindings without `gid` fall back to `0`
-  (the Sheets API default for the first tab) — works for any sheet the
-  dashboard created.
+  cell-level formatting. Older bindings that don't have `gid` are backfilled
+  on demand via `Sheets.ensureGid()` (calls `/api/google/sheets-meta`) the
+  first time a formatting request runs; the resolved gid is persisted on the
+  binding so subsequent calls skip the round-trip.
 - `sessionStorage['merch-google-oauth-state']` and
   `sessionStorage['merch-google-pkce-verifier']` — held only during the popup
   round-trip; cleared on success.

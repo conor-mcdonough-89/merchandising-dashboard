@@ -208,6 +208,31 @@ export async function readValues({ access_token, sheetId, range }) {
   return res.json();
 }
 
+// Fetch lightweight spreadsheet metadata so the browser can recover the
+// worksheet `gid` for bindings created before we started capturing it (or
+// when the operator points the dashboard at a hand-made sheet). Returns
+// `{ gid, title }` for the FIRST tab.
+export async function getSpreadsheetMeta({ access_token, sheetId }) {
+  // fields= keeps the response small -- we only need sheet[0].properties.
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}?fields=sheets.properties.sheetId,sheets.properties.title`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'authorization': `Bearer ${access_token}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets meta ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  const first = data.sheets && data.sheets[0] && data.sheets[0].properties;
+  if (!first || typeof first.sheetId !== 'number') {
+    throw new Error('Sheets meta: no sheets[0].properties.sheetId in response');
+  }
+  return { gid: first.sheetId, title: first.title || 'Sheet1' };
+}
+
 // -------- shared response helpers (mirror of api/anthropic.js) --------
 
 export function json(data, init = {}) {

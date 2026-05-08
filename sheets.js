@@ -253,6 +253,31 @@
     return res.json();
   }
 
+  // Resolve the worksheet's numeric gid (sheetId in the Sheets API). For
+  // bindings created before we captured gid on createSheet, recover it via
+  // /api/google/sheets-meta and persist it. Cell formatting requires this
+  // exact gid -- defaulting to 0 fails with "No grid with id: 0" when the
+  // worksheet's actual id isn't 0.
+  async function ensureGid() {
+    const binding = loadBinding();
+    if (!binding) throw new Error('No sheet bound.');
+    if (typeof binding.gid === 'number') return binding.gid;
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const res = await fetch('/api/google/sheets-meta', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets meta ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    saveBinding({ ...binding, gid: data.gid });
+    return data.gid;
+  }
+
   // Apply yellow background to a set of cells. `range` is the A1 range we
   // stashed on the entry (e.g. "Sheet1!A4:S4"); `columnIndices` are zero-based.
   // Builds spreadsheets.batchUpdate repeatCell requests and POSTs them to the
@@ -265,7 +290,7 @@
     if (!access_token) throw new Error('Not connected to Google.');
     const rowIndex = parseRowIndexFromRange(range);
     if (rowIndex < 0) throw new Error(`Couldn't parse row from range: ${range}`);
-    const gid = typeof binding.gid === 'number' ? binding.gid : 0;
+    const gid = await ensureGid();
     const requests = columnIndices.map((col) => ({
       repeatCell: {
         range: {
