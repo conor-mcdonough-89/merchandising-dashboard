@@ -1,23 +1,23 @@
 /* ═══════════════════════════════════════════════════════════════
    SidelineSwap Merch Dashboard — Styles
-   Hand-written, dark theme. Variables in :root. Mirrors the
-   data-dashboard visual language: Bebas Neue + DM Sans / DM Mono,
-   yellow accent on a near-black surface stack.
+   Hand-written, light theme. Variables in :root. Bebas Neue +
+   DM Sans / DM Mono, deep-yellow brand accent on a white surface
+   stack so input fields and inline editors stay readable.
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
-  --bg: #0d0f14;
-  --surface: #151820;
-  --surface2: #1c2030;
-  --border: #252a3a;
-  --accent: #e8c84a;
-  --accent2: #4a8fe8;
-  --accent3: #e84a6a;
-  --text: #e8eaf0;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface2: #f1f3f7;
+  --border: #d8dbe2;
+  --accent: #b88a14;
+  --accent2: #2563d4;
+  --accent3: #d4445e;
+  --text: #1a1d24;
   --muted: #6b7280;
-  --green: #4ae89a;
-  --red: #e84a6a;
-  --warn: #e89a4a;
+  --green: #20a86d;
+  --red: #d4445e;
+  --warn: #cb781e;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -39,7 +39,7 @@ a:hover { color: var(--accent); }
   justify-content: space-between;
   padding: 16px 28px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(135deg, #0d0f14 0%, #151820 100%);
+  background: linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
   position: sticky;
   top: 0;
   z-index: 100;
@@ -467,15 +467,15 @@ button.primary, button.ghost, button.danger {
   transition: all .15s;
 }
 button.primary {
-  background: var(--accent); color: var(--bg);
+  background: var(--accent); color: #ffffff;
   border-color: var(--accent); font-weight: 600;
 }
-button.primary:hover { background: #f0d45a; }
+button.primary:hover { background: #a07810; border-color: #a07810; }
 button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
-button.ghost { background: var(--surface2); color: var(--text); }
+button.ghost { background: var(--surface); color: var(--text); }
 button.ghost:hover { border-color: var(--accent); color: var(--accent); }
-button.danger { background: var(--surface2); color: var(--red); border-color: var(--red); }
-button.danger:hover { background: rgba(232,74,106,0.15); }
+button.danger { background: var(--surface); color: var(--red); border-color: var(--red); }
+button.danger:hover { background: rgba(212,68,94,0.10); }
 
 input[type="text"], input[type="password"], input[type="search"], input[type="file"], textarea, select {
   background: var(--surface2);
@@ -598,19 +598,19 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .mode-hint:empty { display: none; }
 .mode-hint.mode-merge {
-  background: rgba(74, 232, 154, 0.06);
-  border: 1px solid rgba(74, 232, 154, 0.4);
+  background: rgba(32, 168, 109, 0.10);
+  border: 1px solid rgba(32, 168, 109, 0.4);
   color: var(--green);
 }
 .mode-hint.mode-rename {
-  background: rgba(74, 143, 232, 0.06);
-  border: 1px solid rgba(74, 143, 232, 0.4);
+  background: rgba(37, 99, 212, 0.08);
+  border: 1px solid rgba(37, 99, 212, 0.4);
   color: var(--accent2);
 }
 .mode-hint.mode-state {
-  background: rgba(232, 196, 74, 0.06);
-  border: 1px solid rgba(232, 196, 74, 0.4);
-  color: #e8c44a;
+  background: rgba(184, 138, 20, 0.10);
+  border: 1px solid rgba(184, 138, 20, 0.4);
+  color: var(--accent);
 }
 
 .model-table.mode-state tbody tr { cursor: pointer; }
@@ -643,7 +643,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   transition: all .15s;
 }
 .state-popover .state-opt:hover { border-color: var(--accent); color: var(--accent); }
-.state-popover .state-opt.state-removed:hover { border-color: var(--bad, #e8746a); color: #e8746a; }
+.state-popover .state-opt.state-removed:hover { border-color: var(--red); color: var(--red); }
 
 /* ─── Model table (category panel) ─── */
 .model-table-wrap {
@@ -657,16 +657,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .model-table .model-name.editable:hover { color: var(--accent); }
 .model-table input.rename-input {
   width: 100%;
-  background: var(--bg);
+  background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--accent);
   border-radius: 4px;
   padding: 4px 6px;
   font-size: 12px;
 }
 .model-table.mode-merge tbody tr { cursor: pointer; }
-.model-table tr.row-source td { background: rgba(74, 232, 154, 0.10); border-left: 3px solid var(--green); }
-.model-table tr.row-target td { background: rgba(74, 143, 232, 0.10); border-left: 3px solid var(--accent2); }
-.model-table tr.row-pending-action td:first-child { border-left: 3px solid #e8c44a; }
+.model-table tr.row-source td { background: rgba(32, 168, 109, 0.14); border-left: 3px solid var(--green); }
+.model-table tr.row-target td { background: rgba(37, 99, 212, 0.12); border-left: 3px solid var(--accent2); }
+.model-table tr.row-pending-action td:first-child { border-left: 3px solid var(--accent); }
 
 .pending-badge {
   display: inline-block;
@@ -681,13 +682,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   vertical-align: middle;
 }
 .pending-badge.local {
-  background: rgba(232, 196, 74, 0.10);
-  border-color: rgba(232, 196, 74, 0.4);
-  color: #e8c44a;
+  background: rgba(184, 138, 20, 0.14);
+  border-color: rgba(184, 138, 20, 0.5);
+  color: var(--accent);
 }
 .pending-badge.remote {
-  background: rgba(74, 143, 232, 0.08);
-  border-color: rgba(74, 143, 232, 0.4);
+  background: rgba(37, 99, 212, 0.12);
+  border-color: rgba(37, 99, 212, 0.5);
   color: var(--accent2);
 }
 
@@ -778,7 +779,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   padding: 14px 22px;
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
-  background: linear-gradient(135deg, #0d0f14 0%, #151820 100%);
+  background: linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
 }
 .side-panel > header h2 {
   font-family: 'Bebas Neue', sans-serif;
@@ -858,8 +859,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .convention-card div { margin: 4px 0; font-family: 'DM Mono', monospace; font-size: 11px; }
 .convention-card div strong { color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 500; font-size: 10px; }
 .convention-card.category-scope {
-  border-color: rgba(74, 143, 232, 0.5);
-  background: rgba(74, 143, 232, 0.05);
+  border-color: rgba(37, 99, 212, 0.5);
+  background: rgba(37, 99, 212, 0.06);
 }
 .convention-card .card-actions {
   display: flex;
@@ -909,9 +910,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   margin-bottom: 8px;
 }
 .convention-banner.warn {
-  background: rgba(232, 196, 74, 0.06);
-  border: 1px solid rgba(232, 196, 74, 0.4);
-  color: #e8c44a;
+  background: rgba(184, 138, 20, 0.12);
+  border: 1px solid rgba(184, 138, 20, 0.4);
+  color: var(--accent);
 }
 
 /* ─── Toast ─── */
