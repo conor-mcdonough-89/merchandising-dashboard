@@ -25,9 +25,18 @@
   let _renameEditingId = null; // model id whose name cell is currently being edited
   // Set of sourceIds that have an approved merge in the sheet store. Models in
   // this set are filtered out of the model table so the operator can't
-  // accidentally re-merge them. Rebuilt via refreshMergedSourceSet() on every
+  // accidentally re-merge them. Rebuilt via refreshSheetSourceSets() on every
   // sheet write and on category open.
   let _mergedSourceIds = new Set();
+  // Set of sourceIds with ANY local sheet entry (rename, state change, merge).
+  // Used to badge the model-table row as "pending action" so operators don't
+  // re-act on a model that's already queued.
+  let _pendingActionSourceIds = new Set();
+  // Set of sourceIds that already appear in the bound Google Sheet's column A.
+  // Surfaces cross-operator queueing during the BigQuery-stale window. Empty
+  // when no Sheet is bound or the read fails. Refreshed on category open and
+  // by an explicit "Refresh from Sheet" button.
+  let _remoteActionSourceIds = new Set();
 
   const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
@@ -72,6 +81,7 @@
     document.getElementById('open-settings').addEventListener('click', openSettingsModal);
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
     document.getElementById('push-to-sheets').addEventListener('click', pushSheetToGoogle);
+    document.getElementById('refresh-from-sheet').addEventListener('click', refreshFromSheetClicked);
     document.getElementById('save-mb-config').addEventListener('click', saveMetabaseConfig);
     document.getElementById('test-mb-config').addEventListener('click', testMetabaseConnection);
     document.getElementById('run-sync').addEventListener('click', runSync);
@@ -261,7 +271,11 @@
     _mode = 'browse';
     _mergeSelection = { sourceId: null, targetId: null };
     _renameEditingId = null;
-    await refreshMergedSourceSet();
+    await refreshSheetSourceSets();
+    // Fire-and-forget remote refresh -- the table renders without waiting; the
+    // remote signifier paints in on the next renderModelTable() if any rows
+    // come back. Failures are swallowed inside refreshRemoteSourceSet.
+    refreshRemoteSourceSet().then(() => { if (_activeCategoryId) renderModelTable(); });
     await renderActive();
   }
 
@@ -484,6 +498,14 @@
       if (_mergeSelection.sourceId === m.id) rowClasses.push('row-source');
       else if (_mergeSelection.targetId === m.id) rowClasses.push('row-target');
     }
+    const isLocalPending = _pendingActionSourceIds.has(m.id);
+    const isRemotePending = _remoteActionSourceIds.has(m.id);
+    if (isLocalPending || isRemotePending) rowClasses.push('row-pending-action');
+    const pendingBadge = isLocalPending
+      ? `<span class="pending-badge local" title="Local pending action — already queued in your sheet">⏳ pending</span>`
+      : isRemotePending
+        ? `<span class="pending-badge remote" title="Already in the bound Google Sheet — another operator queued this">⏳ in sheet</span>`
+        : '';
     const stateBadge = m.state === 'available'
       ? `<span class="tag available">Available</span>`
       : `<span class="tag pending">Pending</span>`;
@@ -492,7 +514,7 @@
       : `<span class="model-name${_mode === 'rename' ? ' editable' : ''}" data-id="${m.id}">${escapeHtml(m.name || '')}</span>`;
     return `
       <tr data-model-id="${m.id}" class="${rowClasses.join(' ')}">
-        <td>${nameCell}<div class="muted small mono">#${m.id}</div></td>
+        <td>${nameCell}${pendingBadge}<div class="muted small mono">#${m.id}</div></td>
         <td>${escapeHtml(m.brand_name || '—')}</td>
         <td>${stateBadge}</td>
         <td class="num">${(m.sold_count || 0).toLocaleString()}</td>
@@ -595,6 +617,7 @@
       brandName: source.brand_name || '',
       mergeTargetId: target.id,
       mergeTargetName: target.name,
+      source: buildSourceSnapshot(source),
       reasoning: 'Manual merge (operator)',
     };
     try {
@@ -612,7 +635,7 @@
     await syncEntryToSheet(source.id);
     _mergeSelection = { sourceId: null, targetId: null };
     await refreshSheetCount();
-    await refreshMergedSourceSet();
+    await refreshSheetSourceSets();
     renderModelTable();
     renderMergeConfirmBar();
   }
@@ -675,6 +698,7 @@
       categoryFullName: cat.fullName || cat.name,
       brandName: m.brand_name || '',
       newName: value,
+      source: buildSourceSnapshot(m),
       reasoning: 'Manual rename (operator)',
     };
     try {
@@ -774,6 +798,7 @@
       categoryFullName: cat.fullName || cat.name,
       brandName: model.brand_name || '',
       newState,
+      source: buildSourceSnapshot(model),
       reasoning: 'Manual state change (operator)',
     };
     try {
@@ -795,19 +820,85 @@
 
   // -------- Sheets append (shared with proposal modal + manual modes) --------
 
+  // Snapshot every bulk-import-relevant field of the source model so the sheet
+  // entry carries enough data to populate every column of the CSV / Sheet row
+  // (engineering's importer requires non-blank fields for eligibility).
+  // Captured at first-action time and preserved across subsequent action writes
+  // by Storage.addSheetEntry's read-modify-write semantics.
+  function buildSourceSnapshot(model) {
+    if (!model) return null;
+    return {
+      name: model.name ?? '',
+      description: model.description ?? '',
+      position: model.position ?? '',
+      primary_image_url: model.primary_image_url ?? '',
+      secondary_image_url: model.secondary_image_url ?? '',
+      state: model.state ?? '',
+      category_id: model.category_id ?? '',
+      brand_id: model.brand_id ?? '',
+      synonyms: model.synonyms ?? null,
+      price_retail: model.price_retail ?? '',
+      gtin: model.gtin ?? '',
+      mpn: model.mpn ?? '',
+      line: model.line ?? '',
+      importance: model.importance ?? '',
+      expert_pick: model.expert_pick ?? '',
+      value_guides_start_date: model.value_guides_start_date ?? '',
+      detail_ids: model.detail_ids ?? null,
+    };
+  }
+
+  // BigQuery returns repeated fields as JS arrays. Engineering parses on import
+  // by splitting on `;`. Pass-through scalar values; coerce nullish to ''.
+  function serializeArray(v) {
+    if (Array.isArray(v)) return v.join(';');
+    if (v == null) return '';
+    return String(v);
+  }
+
   function buildCsvRowFromEntry(e) {
     const row = Object.fromEntries(BULK_IMPORT_HEADERS.map((h) => [h, '']));
-    row.model_id = e.sourceId;
-    if (e.newState) row.state = e.newState;
-    // Merges supersede renames: drop the rename if both are set on the same row.
-    // The hide-after-merge filter prevents this in the manual flow, but a stale
-    // entry from before the filter still gets normalized here.
-    if (e.mergeTargetId) {
-      row.merge_target_id = e.mergeTargetId;
-    } else if (e.newName) {
-      row.name = e.newName;
-    }
+    const s = e.source || {};
+
+    // Pre-fill every column with the snapshot's current values.
+    row.model_id              = e.sourceId;
+    row.description           = s.description ?? '';
+    row.position              = s.position ?? '';
+    row.primary_image_url     = s.primary_image_url ?? '';
+    row.secondary_image_url   = s.secondary_image_url ?? '';
+    row.category_id           = s.category_id ?? '';
+    row.brand_id              = s.brand_id ?? '';
+    row.synonyms              = serializeArray(s.synonyms);
+    row.price_retail          = s.price_retail ?? '';
+    row.gtin                  = s.gtin ?? '';
+    row.mpn                   = s.mpn ?? '';
+    row.line                  = s.line ?? '';
+    row.importance            = s.importance ?? '';
+    row.expert_pick           = s.expert_pick ?? '';
+    row.value_guides_start_date = s.value_guides_start_date ?? '';
+    row.detail_ids            = serializeArray(s.detail_ids);
+
+    // Action overrides on top.
+    row.name  = e.newName ?? s.name ?? '';
+    row.state = e.newState ?? (e.mergeTargetId ? 'merged' : (s.state ?? ''));
+    if (e.mergeTargetId) row.merge_target_id = e.mergeTargetId;
+
     return row;
+  }
+
+  // Indices of the columns whose values differ from the source snapshot.
+  // Drives the yellow-highlight call after a Sheet sync.
+  function computeChangedColumns(entry) {
+    const indexOf = (name) => BULK_IMPORT_HEADERS.indexOf(name);
+    const changed = new Set();
+    if (entry.newName) changed.add(indexOf('name'));
+    if (entry.mergeTargetId) {
+      changed.add(indexOf('merge_target_id'));
+      // Implicit state='merged' when the operator hasn't set one explicitly.
+      if (!entry.newState) changed.add(indexOf('state'));
+    }
+    if (entry.newState) changed.add(indexOf('state'));
+    return Array.from(changed).filter((i) => i >= 0);
   }
 
   function buildCsvValuesFromEntry(e) {
@@ -825,6 +916,7 @@
     const entry = await Storage.loadSheetEntry(sourceId);
     if (!entry) return { skipped: true };
     const row = buildCsvValuesFromEntry(entry);
+    let rangeForHighlight = entry.sheetRowRange;
     try {
       if (entry.sheetRowRange) {
         await Sheets.updateRow(entry.sheetRowRange, row);
@@ -833,14 +925,27 @@
         const range = result && result.updates && result.updates.updatedRange;
         if (range) {
           await Storage.addSheetEntry({ sourceId, sheetRowRange: range });
+          rangeForHighlight = range;
         }
       }
-      toast(`Synced row to the bound Google Sheet.`, 'ok');
-      return { ok: true };
     } catch (e) {
       toast(`Saved locally; Sheets sync failed: ${e.message}`, 'error');
       return { error: e.message };
     }
+
+    // Yellow-highlight the cells the operator's action changed. Best-effort:
+    // if formatting fails we still consider the sync a success.
+    const changedCols = computeChangedColumns(entry);
+    if (rangeForHighlight && changedCols.length) {
+      try {
+        await Sheets.highlightCells({ range: rangeForHighlight, columnIndices: changedCols });
+      } catch (e) {
+        toast(`Synced; highlight failed: ${e.message}`, 'error');
+        return { ok: true, highlightError: e.message };
+      }
+    }
+    toast(`Synced row to the bound Google Sheet.`, 'ok');
+    return { ok: true };
   }
 
   // -------- skill: find merges --------
@@ -1432,7 +1537,9 @@
     const rejected = _proposalState.items.filter((i) => i.action === 'reject');
 
     const approvedSourceIds = [];
+    const sourceById = new Map(((_activeCategory && _activeCategory.models) || []).map((m) => [m.id, m]));
     for (const it of approved) {
+      const sourceModel = sourceById.get(it.source_id);
       const entry = {
         sourceId: it.source_id,
         sourceName: it.source_name,
@@ -1444,6 +1551,7 @@
         ...(isMerge
           ? { mergeTargetId: it.target_id, mergeTargetName: it.target_name }
           : { newName: it.new_name }),
+        source: buildSourceSnapshot(sourceModel),
         reasoning: it.reasoning || '',
       };
       await Storage.addSheetEntry(entry);
@@ -1467,7 +1575,7 @@
     }
     closeModal('proposal-modal');
     await refreshSheetCount();
-    await refreshMergedSourceSet();
+    await refreshSheetSourceSets();
     if (_activeCategory) renderModelTable();
     toast(`Added ${approved.length} to sheet, recorded ${rejected.length} rejections.`, 'ok');
     for (const id of approvedSourceIds) await syncEntryToSheet(id);
@@ -1761,6 +1869,22 @@
     else toast(`Pushed ${ok} row(s) to the bound Sheet.`, 'ok');
   }
 
+  // Header button in the sheet panel: re-pull column A of the bound Sheet so
+  // model rows other operators have queued get the "in sheet" badge.
+  async function refreshFromSheetClicked() {
+    const btn = document.getElementById('refresh-from-sheet');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Refreshing…';
+    const result = await refreshRemoteSourceSet();
+    btn.disabled = false;
+    btn.textContent = original;
+    if (result.error) toast(`Refresh failed: ${result.error}`, 'error');
+    else if (result.skipped) toast('Connect Google and create a sheet first (⚙ Settings).', 'error');
+    else toast(`Found ${result.count} model(s) already in the bound Sheet.`, 'ok');
+    if (_activeCategory) renderModelTable();
+  }
+
   async function refreshSheetCount() {
     const entries = await Storage.listSheetEntries();
     document.getElementById('sheet-count').textContent = entries.length;
@@ -1768,10 +1892,30 @@
 
   // Rebuild the in-memory set of sourceIds that have an approved merge in the
   // sheet store. Called on category open and after every sheet write. Cheap:
-  // one IndexedDB read per call; the sheet stays small in practice.
-  async function refreshMergedSourceSet() {
+  // one IndexedDB read per call; the sheet stays small in practice. Rebuilds
+  // both _mergedSourceIds (for the hide-after-merge filter) and
+  // _pendingActionSourceIds (for the row-level "pending" signifier).
+  async function refreshSheetSourceSets() {
     const entries = await Storage.listSheetEntries();
     _mergedSourceIds = new Set(entries.filter((e) => e.mergeTargetId).map((e) => e.sourceId));
+    _pendingActionSourceIds = new Set(entries.map((e) => e.sourceId));
+  }
+
+  // Pull column A from the bound Google Sheet so we can flag models another
+  // operator has queued. No-op when not connected; clears the set on failure
+  // so a stale signifier doesn't outlive the Sheet binding.
+  async function refreshRemoteSourceSet() {
+    if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) {
+      _remoteActionSourceIds = new Set();
+      return { skipped: true };
+    }
+    try {
+      _remoteActionSourceIds = await Sheets.readSourceIdsColumn();
+      return { ok: true, count: _remoteActionSourceIds.size };
+    } catch (e) {
+      _remoteActionSourceIds = new Set();
+      return { error: e.message };
+    }
   }
 
   async function refreshSheetPanel() {
@@ -1779,8 +1923,10 @@
     const body = document.getElementById('sheet-body');
     document.getElementById('sheet-count').textContent = entries.length;
     const pushBtn = document.getElementById('push-to-sheets');
+    const refreshBtn = document.getElementById('refresh-from-sheet');
     const sheetsBound = !!(global.Sheets && Sheets.isConnected() && Sheets.loadBinding());
     pushBtn.classList.toggle('hidden', !sheetsBound || !entries.length);
+    refreshBtn.classList.toggle('hidden', !sheetsBound);
     if (!entries.length) {
       body.innerHTML = `<div class="empty-state" style="margin-top:18px;">
         <strong>Sheet is empty.</strong> Approve proposals to add them.
@@ -1815,7 +1961,7 @@
         row.querySelector('.remove').addEventListener('click', async () => {
           await Storage.removeSheetEntry(e.sourceId);
           await refreshSheetPanel();
-          await refreshMergedSourceSet();
+          await refreshSheetSourceSets();
           if (_activeCategory) renderModelTable();
         });
         div.appendChild(row);
@@ -1828,7 +1974,7 @@
     showConfirm('Clear sheet?', 'This removes all approved proposals from the in-progress sheet. Approval/rejection history in IndexedDB is preserved.', async () => {
       await Storage.clearSheet();
       await refreshSheetPanel();
-      await refreshMergedSourceSet();
+      await refreshSheetSourceSets();
       if (_activeCategory) renderModelTable();
       toast('Sheet cleared.', 'ok');
     });

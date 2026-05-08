@@ -666,6 +666,30 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .model-table.mode-merge tbody tr { cursor: pointer; }
 .model-table tr.row-source td { background: rgba(74, 232, 154, 0.10); border-left: 3px solid var(--green); }
 .model-table tr.row-target td { background: rgba(74, 143, 232, 0.10); border-left: 3px solid var(--accent2); }
+.model-table tr.row-pending-action td:first-child { border-left: 3px solid #e8c44a; }
+
+.pending-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-radius: 8px;
+  border: 1px solid;
+  vertical-align: middle;
+}
+.pending-badge.local {
+  background: rgba(232, 196, 74, 0.10);
+  border-color: rgba(232, 196, 74, 0.4);
+  color: #e8c44a;
+}
+.pending-badge.remote {
+  background: rgba(74, 143, 232, 0.08);
+  border-color: rgba(74, 143, 232, 0.4);
+  color: var(--accent2);
+}
 
 .merge-confirm-bar {
   position: sticky;

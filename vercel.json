@@ -12,6 +12,8 @@
     { "source": "/api/google/sheets-create", "destination": "/api/google/sheets-create" },
     { "source": "/api/google/sheets-append", "destination": "/api/google/sheets-append" },
     { "source": "/api/google/sheets-update", "destination": "/api/google/sheets-update" },
+    { "source": "/api/google/sheets-format", "destination": "/api/google/sheets-format" },
+    { "source": "/api/google/sheets-read", "destination": "/api/google/sheets-read" },
     { "source": "/api/conventions/list", "destination": "/api/conventions/list" },
     { "source": "/api/conventions/upsert", "destination": "/api/conventions/upsert" }
   ]

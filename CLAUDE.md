@@ -39,6 +39,8 @@ to the catalog.
 | `api/google/sheets-create.js` | Edge Function. POST `{ access_token, title, headerRow }` → creates a new spreadsheet, writes the bulk-import header row, returns `{ sheetId, url }`. |
 | `api/google/sheets-append.js` | Edge Function. POST `{ access_token, sheetId, rows }` → appends rows. Returns `updates.updatedRange` so callers can update the same row later. |
 | `api/google/sheets-update.js` | Edge Function. POST `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. Used when a previously-synced model gets a layered action. |
+| `api/google/sheets-format.js` | Edge Function. POST `{ access_token, sheetId, requests }` → applies cell formatting via `spreadsheets.batchUpdate`. Used to yellow-highlight cells the operator's action changed. |
+| `api/google/sheets-read.js` | Edge Function. POST `{ access_token, sheetId, range }` → reads cell values via `spreadsheets.values.get`. Used to pull column A (model_ids) for the cross-operator pending signifier. |
 | `api/conventions/list.js` | Edge Function. GET `?categoryId=37` → returns `{ category, brands }` for that category from Supabase. |
 | `api/conventions/upsert.js` | Edge Function. POST a category or brand convention → upserts into Supabase, returns the written row. |
 | `server.js` | Zero-dep Node fallback for self-hosting. Serves the static SPA and mirrors the Edge Functions. Node ≥18. |
@@ -256,6 +258,15 @@ sortable, filterable table. Toolbars stack above:
 
 Default sort is `sold_count DESC` so high-priority models float up.
 
+**Pending-action signifier.** Models with a queued action get an inline
+`⏳ pending` (local) or `⏳ in sheet` (cross-operator) badge plus a yellow
+left-border accent. Local pending comes from the IndexedDB `sheet` store;
+cross-operator comes from `Sheets.readSourceIdsColumn` (column A of the
+bound Google Sheet) and refreshes on category open + a manual *Refresh
+from Sheet* button in the sheet side panel header. BigQuery is one-day
+stale, so the signifier is the operator's only way to see that a model is
+already queued before BQ catches up.
+
 ### 6. Sheet → CSV / live Sheets sync
 
 Each approved proposal — manual (Merge Mode / Rename Mode) or LLM-driven —
@@ -283,22 +294,41 @@ Header row, in this exact order:
 model_id,description,position,primary_image_url,secondary_image_url,state,merge_target_id,category_id,name,brand_id,synonyms,price_retail,gtin,mpn,line,importance,expert_pick,value_guides_start_date,detail_ids
 ```
 
-Columns populated by the dashboard today:
+Every column is populated. The bulk importer requires the model's current
+field values for eligibility, so on first action the dashboard snapshots
+the source model into the sheet entry under `entry.source` (read-modify-
+write preserves it across subsequent action writes). `buildCsvRowFromEntry`
+fills every column from that snapshot, then layers the operator's action
+overrides on top:
 
-- `model_id` — required, the source model being changed
-- `merge_target_id` — set for merges; the target model the source folds into
-- `name` — set for renames; the canonical name the model becomes
-- `state` — set by State Mode; one of `available` / `pending` / `removed`
+- `model_id` — `entry.sourceId`.
+- `name` — `entry.newName ?? source.name`.
+- `state` — `entry.newState ?? (entry.mergeTargetId ? 'merged' : source.state)`.
+  An implicit merge writes `state='merged'` when the operator hasn't set one.
+- `merge_target_id` — `entry.mergeTargetId` if set; blank otherwise.
+- Every other column (description, position, primary/secondary_image_url,
+  category_id, brand_id, synonyms, price_retail, gtin, mpn, line, importance,
+  expert_pick, value_guides_start_date, detail_ids) — `source[*]`. Repeated
+  fields (synonyms, detail_ids) are joined with `;` so engineering can split
+  on import.
 
-All other columns left blank. Blanks mean "no change" to the importer. A merge
-supersedes a rename on the same row — the rename is dropped at export and a warning
-toast is shown. State and merge can coexist in the row.
+Merges still supersede renames inside one row: if both `mergeTargetId` and
+`newName` are set, `merge_target_id` wins and `name` falls back to
+`source.name`. The hide-after-merge filter prevents this in practice; the
+guard catches stale entries.
 
 Layered actions (e.g. a state change followed by a rename on the same model)
 **dedup into a single row**: `Storage.addSheetEntry` is read-modify-write, so
 each action overwrites only its own field. The `sheet` IndexedDB store is
 keyed by `sourceId`, so there is always one row per model regardless of how
 many actions were taken.
+
+**Yellow highlighting** in the bound Google Sheet marks the columns the
+operator's action changed (`name`, `state`, `merge_target_id` as applicable).
+After each `appendRows` / `updateRow`, the dashboard calls
+`Sheets.highlightCells` against the entry's `sheetRowRange` for the columns
+returned by `computeChangedColumns(entry)`. The CSV download is plain — no
+formatting.
 
 Filename pattern: `merch-update-<sport>-<YYYY-MM-DD>-<HHMMSS>.csv`.
 
@@ -338,6 +368,8 @@ server-side; tokens live in browser localStorage.
 | `POST /api/google/sheets-create` | POST | `{ access_token, title, headerRow }` → creates a new spreadsheet, writes the header row, returns `{ sheetId, url }`. |
 | `POST /api/google/sheets-append` | POST | `{ access_token, sheetId, rows }` → appends rows. Response includes `updates.updatedRange` for in-place updates later. |
 | `POST /api/google/sheets-update` | POST | `{ access_token, sheetId, range, row }` → overwrites the given A1 range via `values.update`. |
+| `POST /api/google/sheets-format` | POST | `{ access_token, sheetId, requests }` → `spreadsheets.batchUpdate` with `repeatCell` requests. Yellow-highlights the cells operator actions changed. |
+| `POST /api/google/sheets-read`   | POST | `{ access_token, sheetId, range }` → `spreadsheets.values.get`. Used to pull column A (model_ids) for the cross-operator pending signifier. |
 
 ### Required env vars
 
@@ -356,7 +388,12 @@ Drive metadata.
 
 - `localStorage['merch-google-tokens']` = `{ access_token, refresh_token, expires_at }`.
   `expires_at` is `Date.now() + (expires_in - 60s)` so we refresh proactively.
-- `localStorage['merch-sheets-binding']` = `{ sheetId, url, title, createdAt }`.
+- `localStorage['merch-sheets-binding']` = `{ sheetId, url, gid, title, createdAt }`.
+  `gid` is the worksheet's numeric tab id (from `spreadsheets.create` response
+  `sheets[0].properties.sheetId`); needed by `spreadsheets.batchUpdate` for
+  cell-level formatting. Pre-existing bindings without `gid` fall back to `0`
+  (the Sheets API default for the first tab) — works for any sheet the
+  dashboard created.
 - `sessionStorage['merch-google-oauth-state']` and
   `sessionStorage['merch-google-pkce-verifier']` — held only during the popup
   round-trip; cleared on success.

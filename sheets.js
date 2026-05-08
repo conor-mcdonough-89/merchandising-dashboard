@@ -207,6 +207,7 @@
     saveBinding({
       sheetId: data.sheetId,
       url: data.url,
+      gid: typeof data.gid === 'number' ? data.gid : 0,
       title: title || 'SidelineSwap Merch Bulk Import',
       createdAt: new Date().toISOString(),
     });
@@ -252,6 +253,83 @@
     return res.json();
   }
 
+  // Apply yellow background to a set of cells. `range` is the A1 range we
+  // stashed on the entry (e.g. "Sheet1!A4:S4"); `columnIndices` are zero-based.
+  // Builds spreadsheets.batchUpdate repeatCell requests and POSTs them to the
+  // sheets-format Edge Function.
+  async function highlightCells({ range, columnIndices }) {
+    const binding = loadBinding();
+    if (!binding) throw new Error('No sheet bound.');
+    if (!range || !Array.isArray(columnIndices) || !columnIndices.length) return { skipped: true };
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const rowIndex = parseRowIndexFromRange(range);
+    if (rowIndex < 0) throw new Error(`Couldn't parse row from range: ${range}`);
+    const gid = typeof binding.gid === 'number' ? binding.gid : 0;
+    const requests = columnIndices.map((col) => ({
+      repeatCell: {
+        range: {
+          sheetId: gid,
+          startRowIndex: rowIndex,
+          endRowIndex: rowIndex + 1,
+          startColumnIndex: col,
+          endColumnIndex: col + 1,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 1.0, green: 0.95, blue: 0.5, alpha: 1 },
+          },
+        },
+        fields: 'userEnteredFormat.backgroundColor',
+      },
+    }));
+    const res = await fetch('/api/google/sheets-format', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, requests }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets format ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  // Parse the zero-based row index from an A1 range like "Sheet1!A4:S4". Picks
+  // the digits after the first column letter; returns -1 on failure.
+  function parseRowIndexFromRange(range) {
+    const m = /[A-Z]+(\d+)/.exec(range || '');
+    if (!m) return -1;
+    return parseInt(m[1], 10) - 1;
+  }
+
+  // Read column A (model_id) from the bound Sheet. Skips the header row.
+  // Returns a Set of integers.
+  async function readSourceIdsColumn() {
+    const binding = loadBinding();
+    if (!binding) throw new Error('No sheet bound.');
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const res = await fetch('/api/google/sheets-read', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, range: 'Sheet1!A2:A' }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets read ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const ids = new Set();
+    for (const row of data.values || []) {
+      const v = row && row[0];
+      if (v == null || v === '') continue;
+      const n = parseInt(v, 10);
+      if (!Number.isNaN(n)) ids.add(n);
+    }
+    return ids;
+  }
+
   global.Sheets = {
     startAuth,
     disconnect,
@@ -260,5 +338,7 @@
     createSheet,
     appendRows,
     updateRow,
+    highlightCells,
+    readSourceIdsColumn,
   };
 })(window);
