@@ -328,9 +328,14 @@
     return parseInt(m[1], 10) - 1;
   }
 
-  // Read column A (model_id) from the bound Sheet. Skips the header row.
-  // Returns a Set of integers.
-  async function readSourceIdsColumn() {
+  // Read columns A (model_id) through I (name) from the bound Sheet, skipping
+  // the header row. Returns a Map<sourceId, { newName?, newState?,
+  // mergeTargetId? }> so cross-operator pending changes can show the same
+  // inline diff as local actions. The sheets-read endpoint is unchanged --
+  // we just hand it a wider range.
+  // Column layout (from BULK_IMPORT_HEADERS): 0=model_id, 5=state,
+  //   6=merge_target_id, 8=name.
+  async function readPendingActions() {
     const binding = loadBinding();
     if (!binding) throw new Error('No sheet bound.');
     const access_token = await refreshIfNeeded();
@@ -338,21 +343,30 @@
     const res = await fetch('/api/google/sheets-read', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ access_token, sheetId: binding.sheetId, range: 'Sheet1!A2:A' }),
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, range: 'Sheet1!A2:I' }),
     });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Sheets read ${res.status}: ${text.slice(0, 200)}`);
     }
     const data = await res.json();
-    const ids = new Set();
+    const map = new Map();
     for (const row of data.values || []) {
-      const v = row && row[0];
-      if (v == null || v === '') continue;
-      const n = parseInt(v, 10);
-      if (!Number.isNaN(n)) ids.add(n);
+      if (!row || !row.length) continue;
+      const sourceId = parseInt(row[0], 10);
+      if (Number.isNaN(sourceId)) continue;
+      const state = (row[5] || '').toString().trim();
+      const mergeTargetIdRaw = row[6];
+      const newName = (row[8] || '').toString().trim();
+      const mergeTargetId = mergeTargetIdRaw === '' || mergeTargetIdRaw == null
+        ? NaN : parseInt(mergeTargetIdRaw, 10);
+      const action = {};
+      if (state) action.newState = state;
+      if (!Number.isNaN(mergeTargetId)) action.mergeTargetId = mergeTargetId;
+      if (newName) action.newName = newName;
+      if (Object.keys(action).length) map.set(sourceId, action);
     }
-    return ids;
+    return map;
   }
 
   global.Sheets = {
@@ -364,6 +378,6 @@
     appendRows,
     updateRow,
     highlightCells,
-    readSourceIdsColumn,
+    readPendingActions,
   };
 })(window);

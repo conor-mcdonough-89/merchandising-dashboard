@@ -261,12 +261,17 @@ Default sort is `sold_count DESC` so high-priority models float up.
 
 **Pending-action signifier.** Models with a queued action get an inline
 `⏳ pending` (local) or `⏳ in sheet` (cross-operator) badge plus a yellow
-left-border accent. Local pending comes from the IndexedDB `sheet` store;
-cross-operator comes from `Sheets.readSourceIdsColumn` (column A of the
-bound Google Sheet) and refreshes on category open + a manual *Refresh
-from Sheet* button in the sheet side panel header. BigQuery is one-day
-stale, so the signifier is the operator's only way to see that a model is
-already queued before BQ catches up.
+left-border accent AND an in-cell diff: the row still shows the BigQuery
+value, with `→ <new value>` directly under it (rename / merge in the Name
+cell, state inline in the State cell). Local pending comes from the
+IndexedDB `sheet` store; cross-operator comes from
+`Sheets.readPendingActions` which reads `Sheet1!A2:I` (`model_id`,
+`state`, `merge_target_id`, `name` and the surrounding columns) so
+teammate-queued changes get the same diff treatment. Refreshes on
+category open + a manual *Refresh from Sheet* button in the sheet side
+panel header. BigQuery is one-day stale, so the signifier is the
+operator's only way to see that a model is already queued before BQ
+catches up.
 
 ### 6. Sheet → CSV / live Sheets sync
 
