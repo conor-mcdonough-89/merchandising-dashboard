@@ -692,6 +692,25 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   color: var(--accent2);
 }
 
+/* Inline diff -- "→ <new>" rendered under the cell value (or inline next to
+   the state badge). Reads as: original on top, queued change directly below. */
+.pending-change {
+  display: block;
+  margin-top: 2px;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  line-height: 1.4;
+}
+.pending-change strong { font-weight: 600; }
+.pending-change.pending-merge { color: var(--accent2); }
+.pending-change.pending-state {
+  display: inline-block;
+  margin-left: 6px;
+  margin-top: 0;
+  vertical-align: middle;
+}
+
 .merge-confirm-bar {
   position: sticky;
   bottom: 0;

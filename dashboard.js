@@ -28,15 +28,16 @@
   // accidentally re-merge them. Rebuilt via refreshSheetSourceSets() on every
   // sheet write and on category open.
   let _mergedSourceIds = new Set();
-  // Set of sourceIds with ANY local sheet entry (rename, state change, merge).
-  // Used to badge the model-table row as "pending action" so operators don't
-  // re-act on a model that's already queued.
-  let _pendingActionSourceIds = new Set();
-  // Set of sourceIds that already appear in the bound Google Sheet's column A.
-  // Surfaces cross-operator queueing during the BigQuery-stale window. Empty
-  // when no Sheet is bound or the read fails. Refreshed on category open and
-  // by an explicit "Refresh from Sheet" button.
-  let _remoteActionSourceIds = new Set();
+  // Map of sourceId -> { newName?, newState?, mergeTargetId?, mergeTargetName? }
+  // for any model with a local sheet entry. Used to render the inline pending
+  // diff on the row (operator sees both the BigQuery value and the queued
+  // change). Rebuilt by refreshSheetSourceSets() alongside _mergedSourceIds.
+  let _pendingActionsBySourceId = new Map();
+  // Map of sourceId -> { newName?, newState?, mergeTargetId? } for actions
+  // already in the bound Google Sheet by another operator. Populated from
+  // Sheets.readPendingActions on category open and by the explicit Refresh
+  // from Sheet button. Empty when no Sheet is bound or the read fails.
+  let _remoteActionsBySourceId = new Map();
 
   const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
@@ -275,7 +276,7 @@
     // Fire-and-forget remote refresh -- the table renders without waiting; the
     // remote signifier paints in on the next renderModelTable() if any rows
     // come back. Failures are swallowed inside refreshRemoteSourceSet.
-    refreshRemoteSourceSet().then(() => { if (_activeCategoryId) renderModelTable(); });
+    refreshRemoteActions().then(() => { if (_activeCategoryId) renderModelTable(); });
     await renderActive();
   }
 
@@ -498,14 +499,32 @@
       if (_mergeSelection.sourceId === m.id) rowClasses.push('row-source');
       else if (_mergeSelection.targetId === m.id) rowClasses.push('row-target');
     }
-    const isLocalPending = _pendingActionSourceIds.has(m.id);
-    const isRemotePending = _remoteActionSourceIds.has(m.id);
-    if (isLocalPending || isRemotePending) rowClasses.push('row-pending-action');
-    const pendingBadge = isLocalPending
+    const localAction = _pendingActionsBySourceId.get(m.id) || null;
+    const remoteAction = !localAction ? (_remoteActionsBySourceId.get(m.id) || null) : null;
+    const action = localAction || remoteAction;
+    if (action) rowClasses.push('row-pending-action');
+    const pendingBadge = localAction
       ? `<span class="pending-badge local" title="Local pending action — already queued in your sheet">⏳ pending</span>`
-      : isRemotePending
+      : remoteAction
         ? `<span class="pending-badge remote" title="Already in the bound Google Sheet — another operator queued this">⏳ in sheet</span>`
         : '';
+
+    // Resolve a friendly merge-target name. Local entries already carry it;
+    // cross-operator entries only have the id and we backfill from the synced
+    // category if the target happens to live there.
+    let mergeTargetName = action && action.mergeTargetName;
+    if (action && action.mergeTargetId && !mergeTargetName) {
+      const t = (_activeCategory && _activeCategory.models || []).find((x) => x.id === action.mergeTargetId);
+      if (t) mergeTargetName = t.name;
+    }
+
+    const renameDiff = action && action.newName
+      ? `<div class="pending-change pending-rename">→ ${escapeHtml(action.newName)}</div>` : '';
+    const mergeDiff = action && action.mergeTargetId
+      ? `<div class="pending-change pending-merge">→ merging into <strong>${escapeHtml(mergeTargetName || '')}</strong> <span class="muted small">#${action.mergeTargetId}</span></div>` : '';
+    const stateDiff = action && action.newState
+      ? `<span class="pending-change pending-state">→ <strong>${escapeHtml(action.newState)}</strong></span>` : '';
+
     const stateBadge = m.state === 'available'
       ? `<span class="tag available">Available</span>`
       : `<span class="tag pending">Pending</span>`;
@@ -514,9 +533,9 @@
       : `<span class="model-name${_mode === 'rename' ? ' editable' : ''}" data-id="${m.id}">${escapeHtml(m.name || '')}</span>`;
     return `
       <tr data-model-id="${m.id}" class="${rowClasses.join(' ')}">
-        <td>${nameCell}${pendingBadge}<div class="muted small mono">#${m.id}</div></td>
+        <td>${nameCell}${pendingBadge}<div class="muted small mono">#${m.id}</div>${renameDiff}${mergeDiff}</td>
         <td>${escapeHtml(m.brand_name || '—')}</td>
-        <td>${stateBadge}</td>
+        <td>${stateBadge}${stateDiff}</td>
         <td class="num">${(m.sold_count || 0).toLocaleString()}</td>
         <td class="num">${(m.last_90_sold_count || 0).toLocaleString()}</td>
         <td class="num">${(m.available_count || 0).toLocaleString()}</td>
@@ -1876,7 +1895,7 @@
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Refreshing…';
-    const result = await refreshRemoteSourceSet();
+    const result = await refreshRemoteActions();
     btn.disabled = false;
     btn.textContent = original;
     if (result.error) toast(`Refresh failed: ${result.error}`, 'error');
@@ -1893,27 +1912,37 @@
   // Rebuild the in-memory set of sourceIds that have an approved merge in the
   // sheet store. Called on category open and after every sheet write. Cheap:
   // one IndexedDB read per call; the sheet stays small in practice. Rebuilds
-  // both _mergedSourceIds (for the hide-after-merge filter) and
-  // _pendingActionSourceIds (for the row-level "pending" signifier).
+  // _mergedSourceIds (for the hide-after-merge filter) and the
+  // _pendingActionsBySourceId Map (for the inline diff in modelRow).
   async function refreshSheetSourceSets() {
     const entries = await Storage.listSheetEntries();
     _mergedSourceIds = new Set(entries.filter((e) => e.mergeTargetId).map((e) => e.sourceId));
-    _pendingActionSourceIds = new Set(entries.map((e) => e.sourceId));
+    const local = new Map();
+    for (const e of entries) {
+      const action = {};
+      if (e.newName)         action.newName = e.newName;
+      if (e.newState)        action.newState = e.newState;
+      if (e.mergeTargetId)   action.mergeTargetId = e.mergeTargetId;
+      if (e.mergeTargetName) action.mergeTargetName = e.mergeTargetName;
+      if (Object.keys(action).length) local.set(e.sourceId, action);
+    }
+    _pendingActionsBySourceId = local;
   }
 
-  // Pull column A from the bound Google Sheet so we can flag models another
-  // operator has queued. No-op when not connected; clears the set on failure
+  // Pull the action columns (model_id, state, merge_target_id, name) from the
+  // bound Google Sheet so cross-operator pending changes show the same inline
+  // diff as local ones. No-op when not connected; clears the map on failure
   // so a stale signifier doesn't outlive the Sheet binding.
-  async function refreshRemoteSourceSet() {
+  async function refreshRemoteActions() {
     if (!global.Sheets || !Sheets.isConnected() || !Sheets.loadBinding()) {
-      _remoteActionSourceIds = new Set();
+      _remoteActionsBySourceId = new Map();
       return { skipped: true };
     }
     try {
-      _remoteActionSourceIds = await Sheets.readSourceIdsColumn();
-      return { ok: true, count: _remoteActionSourceIds.size };
+      _remoteActionsBySourceId = await Sheets.readPendingActions();
+      return { ok: true, count: _remoteActionsBySourceId.size };
     } catch (e) {
-      _remoteActionSourceIds = new Set();
+      _remoteActionsBySourceId = new Map();
       return { error: e.message };
     }
   }
