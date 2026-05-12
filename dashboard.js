@@ -98,7 +98,7 @@
     document.getElementById('create-sheet').addEventListener('click', createGoogleSheet);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal', 'settings-modal']
+        ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal', 'settings-modal', 'rename-run-modal']
           .forEach((id) => closeModal(id));
         closeSheet();
         if (_mode === 'rename' && _renameEditingId != null) cancelRenameEdit();
@@ -392,7 +392,7 @@
     });
 
     main.querySelector('#skill-merges').addEventListener('click', () => runFindMerges(cat));
-    main.querySelector('#skill-renames').addEventListener('click', () => runFindRenames(cat));
+    main.querySelector('#skill-renames').addEventListener('click', () => openRenameRunModal(cat));
     main.querySelector('#skill-conventions').addEventListener('click', () => runInspectConventions(cat));
 
     renderModeHint();
@@ -1026,7 +1026,50 @@
 
   // -------- skill: find renames --------
 
-  async function runFindRenames(cat) {
+  // Show the pre-run modal so the operator can opt into web research (and
+  // supply a directive) before Find Renames fires. The modal markup lives in
+  // index.html and is hidden by default; openModal toggles the `.hidden`
+  // class on the backdrop. Submit reads the checkbox + textarea and hands
+  // off to runFindRenames; cancel closes without running.
+  function openRenameRunModal(cat) {
+    const overlay = document.getElementById('rename-run-modal');
+    if (!overlay) {
+      // Fallback for missing markup -- run with research off.
+      return runFindRenames(cat, { enableWebSearch: false, researchDirective: '' });
+    }
+    const models = filteredModels(cat);
+    const summary = overlay.querySelector('[data-rename-run-summary]');
+    const brandFilterLabel = _filters.brand === 'all' ? 'all brands' : _filters.brand;
+    if (summary) {
+      summary.textContent = `Category: ${cat.fullName || cat.name} · Brand filter: ${brandFilterLabel} · ${models.length} model${models.length === 1 ? '' : 's'} in scope`;
+    }
+    const enableBox = overlay.querySelector('#rename-run-enable-research');
+    const directiveBox = overlay.querySelector('#rename-run-directive');
+    const directiveWrap = overlay.querySelector('[data-rename-run-directive-wrap]');
+    if (enableBox) enableBox.checked = false;
+    if (directiveBox) directiveBox.value = '';
+    if (directiveWrap) directiveWrap.style.display = 'none';
+    if (enableBox && directiveWrap) {
+      enableBox.onchange = () => {
+        directiveWrap.style.display = enableBox.checked ? 'block' : 'none';
+        if (enableBox.checked && directiveBox) directiveBox.focus();
+      };
+    }
+    const closeBtn = overlay.querySelector('[data-rename-run-cancel]');
+    const submitBtn = overlay.querySelector('[data-rename-run-submit]');
+    if (closeBtn) closeBtn.onclick = () => closeModal('rename-run-modal');
+    if (submitBtn) submitBtn.onclick = () => {
+      const enableWebSearch = !!(enableBox && enableBox.checked);
+      const researchDirective = enableWebSearch && directiveBox ? (directiveBox.value || '').trim() : '';
+      closeModal('rename-run-modal');
+      runFindRenames(cat, { enableWebSearch, researchDirective });
+    };
+    openModal('rename-run-modal');
+  }
+
+  async function runFindRenames(cat, opts = {}) {
+    const enableWebSearch = !!opts.enableWebSearch;
+    const researchDirective = opts.researchDirective || '';
     const models = filteredModels(cat);
     if (!models.length) return toast('No models match the current filters.', 'error');
 
@@ -1058,7 +1101,9 @@
           models: g.models,
           convention: conv,
           categoryConvention,
-          onProgress: (p) => updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}`),
+          enableWebSearch,
+          researchDirective,
+          onProgress: (p) => updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}${enableWebSearch ? ' (web research on)' : ''}`),
         });
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);

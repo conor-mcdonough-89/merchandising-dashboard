@@ -171,6 +171,38 @@
     </div>
   </div>
 
+  <!-- Find Renames pre-run modal: opt-in web research + research directive -->
+  <div class="modal-backdrop hidden" id="rename-run-modal">
+    <div class="modal" style="max-width: 520px;">
+      <header>
+        <h2>Find Renames</h2>
+        <button class="close" data-rename-run-cancel>×</button>
+      </header>
+      <div class="body" style="padding: 18px 22px;">
+        <p class="muted small" data-rename-run-summary style="margin-bottom: 14px;"></p>
+        <label class="row-flex" style="gap: 8px; margin-bottom: 10px; cursor: pointer;">
+          <input type="checkbox" id="rename-run-enable-research">
+          <span><strong>Enable web research</strong> <span class="muted small">(uses Anthropic web_search)</span></span>
+        </label>
+        <p class="muted small" style="margin-bottom: 14px;">
+          When on, the LLM may use web_search to fill convention-required info that the model's name doesn't carry (e.g., identifying Material on a bat). Adds latency and a small per-search cost. Off by default.
+        </p>
+        <div data-rename-run-directive-wrap style="display: none;">
+          <label for="rename-run-directive" class="small" style="display:block;margin-bottom:6px;">Research directive</label>
+          <textarea id="rename-run-directive" rows="3" placeholder="e.g., Identify Material (Composite / Alloy / Hybrid) where the name doesn't already include one." style="width: 100%; resize: vertical; font-family: inherit;"></textarea>
+          <p class="muted small" style="margin-top: 6px;">
+            Short instruction the LLM follows in addition to the saved convention. Not persisted — fresh each run.
+          </p>
+        </div>
+      </div>
+      <footer>
+        <div class="spacer"></div>
+        <button class="ghost" data-rename-run-cancel>Cancel</button>
+        <button class="primary" data-rename-run-submit>Start</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Confirm dialog -->
   <div class="modal-backdrop hidden" id="confirm-modal">
     <div class="modal" style="max-width: 420px;">

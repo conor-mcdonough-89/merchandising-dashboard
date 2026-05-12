@@ -20,15 +20,20 @@ export function requireKey() {
   return key;
 }
 
-// callAnthropic({ model, system, user, max_tokens, response_format })
-// `user` may be a string OR an array of content blocks.
-// Returns the raw assistant text (concatenation of text blocks).
+// callAnthropic({ model, system, user, max_tokens, temperature, tools })
+// `system` and `user` may each be a string OR an array of content blocks.
+// Array form lets callers attach `cache_control: { type: 'ephemeral' }` to a
+// block for Anthropic prompt caching. `tools` is forwarded as-is when set --
+// used for the web_search_20250305 server tool on the renames endpoint.
+// Returns { text, raw } where text is the concatenation of `type: 'text'`
+// blocks (server-tool blocks like web_search_tool_result pass through raw).
 export async function callAnthropic({
   model,
   system,
   user,
   max_tokens = 4096,
   temperature = 0.2,
+  tools,
 }) {
   const key = requireKey();
   const messages = [
@@ -45,6 +50,7 @@ export async function callAnthropic({
     system,
     messages,
   };
+  if (Array.isArray(tools) && tools.length) body.tools = tools;
 
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
