@@ -1412,12 +1412,22 @@
     document.getElementById('convention-title').textContent = `Naming Conventions — ${cat.fullName || cat.name}`;
     const body = document.getElementById('convention-body');
     body.innerHTML = `<div style="padding:18px;text-align:center;"><span class="spinner"></span> Loading conventions…</div>`;
+    const clearBtn = document.getElementById('conv-clear-rejections');
+    if (clearBtn) clearBtn.onclick = () => clearRejectionsForCategory(cat);
 
     const payload = await loadConventionsForCategory(cat.id);
     if (payload.error) {
       toast(`Conventions backend unreachable — using cached data. ${payload.error}`, 'error');
     }
     renderConventionModalBody(cat, payload);
+  }
+
+  async function clearRejectionsForCategory(cat) {
+    const ids = (cat.models || []).map((m) => m.id);
+    if (!ids.length) return toast('No synced models in this category.', 'info');
+    const cleared = await Storage.clearRejectionsForSourceIds(ids);
+    if (!cleared) return toast('No pending rejections to clear.', 'info');
+    toast(`Cleared ${cleared} pending rejection${cleared === 1 ? '' : 's'}. Find Renames will re-evaluate those models on the next run.`, 'ok');
   }
 
   function renderConventionModalBody(cat, payload) {
@@ -1575,7 +1585,14 @@
       const saved = await upsertConvention(merged);
       _conventionEdits.delete(merged.key || (merged.scope === 'category' ? `category::${cat.id}` : `${merged.brandId}::${cat.id}`));
       const label = merged.scope === 'category' ? 'category convention' : `convention for ${merged.brandName}`;
-      toast(`Saved ${label}.`, 'ok');
+      // The rules just changed -- past rejections may no longer be valid.
+      // Clear them for the affected sourceIds so the next Find Renames re-
+      // evaluates those models. Category save clears the whole category;
+      // brand save clears only that brand's models.
+      const affected = (cat.models || []).filter((m) => saved.scope === 'category' || m.brand_id === saved.brandId);
+      const cleared = await Storage.clearRejectionsForSourceIds(affected.map((m) => m.id));
+      const clearedNote = cleared ? ` (cleared ${cleared} pending rejection${cleared === 1 ? '' : 's'} so the new rules can re-evaluate them)` : '';
+      toast(`Saved ${label}.${clearedNote}`, 'ok');
       // Use the saved record (server is authoritative on edited_at, etc.).
       if (saved.scope === 'category') renderCategoryCard(cat, saved, false);
       else {

@@ -23,7 +23,7 @@ to the catalog.
 | `sheets.js` | Google Sheets client (browser-side). PKCE OAuth popup flow, token storage in localStorage, `Sheets.startAuth`, `Sheets.disconnect`, `Sheets.isConnected`, `Sheets.loadBinding`, `Sheets.createSheet`, `Sheets.appendRows`. All HTTP through `/api/google/*`. |
 | `clustering.js` | Pure compute. `Clustering.findMergeCandidates(models)`, `Clustering.findRenameCandidates(models, convention)`, `Clustering.jaroWinkler(a, b)`, `Clustering.tokenSetOverlap(a, b)`, `Clustering.selectGoldModels(models)`, `Clustering.packClusterBatches(...)`. |
 | `proposals.js` | Client-side LLM orchestrator. `Proposals.proposeMerges`, `Proposals.proposeRenames`, `Proposals.inferConvention`. Batches large slices and filters previously-rejected source ids. |
-| `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. The `conventions` store is a read-through cache for the Supabase backend; brand records key on `${brandId}::${categoryId}`, category records on `category::${categoryId}`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `saveCategoryConvention`, `loadCategoryConvention`, `listConventionsForCategory`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
+| `storage.js` | IndexedDB schema (v2). Object stores: `categories`, `conventions`, `decisions`, `sheet`. The `conventions` store is a read-through cache for the Supabase backend; brand records key on `${brandId}::${categoryId}`, category records on `category::${categoryId}`. Public API: `openDB`, `saveCategory`, `loadCategory`, `listCategories`, `deleteCategory`, `saveConvention`, `loadConvention`, `saveCategoryConvention`, `loadCategoryConvention`, `listConventionsForCategory`, `recordDecision`, `getRejections`, `clearExpiredDecisions`, `clearRejectionsForSourceIds`, `addSheetEntry`, `removeSheetEntry`, `listSheetEntries`, `clearSheet`. |
 | `style.css` | Hand-written light theme. Variables in `:root`. No frameworks. |
 | `api/metabase-proxy.js` | Vercel Edge Function. Streams `/api/metabase/*` to `${METABASE_URL}/*`. Pass-through for body and headers. |
 | `api/anthropic.js` | Shared Anthropic API helper. Holds the model-id constants `SONNET_MODEL` and `OPUS_MODEL` so swaps happen in one place. Validates `ANTHROPIC_API_KEY`. |
@@ -642,7 +642,12 @@ the Edge Functions cover. Requires Node ≥18.
   PapaParse 5.4.1 (CSV import/export). Do **not** add React, Vue, jQuery, Tailwind,
   etc.
 - **Rejected proposals expire after 30 days.** Implemented as `expiresAt` on the
-  `decisions` store; cleanup runs on each `getRejections()` call.
+  `decisions` store; cleanup runs on each `getRejections()` call. The rejection
+  store is also cleared on demand: saving a convention via the Naming Conventions
+  modal auto-clears rejections for the affected models (category save clears the
+  whole category, brand save clears that brand's models), and the modal footer
+  has a **Clear rejections** button that drops every rejection in the active
+  category at once. Both call `Storage.clearRejectionsForSourceIds`.
 - **Merges supersede renames.** If both are set on the same `sourceId` at export,
   the rename is dropped from the row and a toast is shown. Same rule applies in
   the Sheets append path (`buildCsvRowFromEntry` is shared).

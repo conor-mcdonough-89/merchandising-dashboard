@@ -210,6 +210,31 @@
     return set;
   }
 
+  // Delete all 'rejected' decision records whose sourceId is in the supplied
+  // iterable. Used when a convention is edited so previously-refused
+  // candidates get re-evaluated against the new rules instead of staying
+  // blocked for the rejection TTL. Returns the number of records removed.
+  async function clearRejectionsForSourceIds(sourceIds) {
+    const ids = new Set(Array.from(sourceIds || []));
+    if (!ids.size) return 0;
+    const store = await tx('decisions', 'readwrite');
+    return new Promise((resolve, reject) => {
+      const req = store.openCursor();
+      let removed = 0;
+      req.onsuccess = (event) => {
+        const cursor = event.target.result;
+        if (!cursor) return resolve(removed);
+        const v = cursor.value;
+        if (v.decision === 'rejected' && ids.has(v.sourceId)) {
+          cursor.delete();
+          removed += 1;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
   // -------- sheet (in-progress bulk import) --------
   // Read-modify-write so layered actions (state change + rename, etc.) merge
   // into one record per sourceId instead of overwriting. Callers should pass
@@ -249,7 +274,7 @@
     saveConvention, loadConvention, listConventions, conventionKey,
     saveCategoryConvention, loadCategoryConvention, categoryConventionKey,
     listConventionsForCategory,
-    recordDecision, getRejections, clearExpiredDecisions,
+    recordDecision, getRejections, clearExpiredDecisions, clearRejectionsForSourceIds,
     addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
   };
 })(window);
