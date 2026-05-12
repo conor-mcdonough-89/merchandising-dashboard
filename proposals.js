@@ -21,6 +21,26 @@
     return res.json();
   }
 
+  // Run an async fn over `items` with at most `limit` in flight. Results are
+  // returned in order with { ok, value } | { ok: false, error }. Used to
+  // dispatch per-batch LLM calls in parallel without overwhelming Anthropic's
+  // rate limit. The first batch primes Anthropic's prompt cache; subsequent
+  // batches hit it -- parallelism + caching compound rather than fight.
+  async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (true) {
+        const i = idx++;
+        if (i >= items.length) return;
+        try { results[i] = { ok: true, value: await fn(items[i], i) }; }
+        catch (e) { results[i] = { ok: false, error: e }; }
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
   function buildSlice(models, { brandName = null, categoryId = null } = {}) {
     return models.filter((m) => {
       if (brandName != null && m.brand_name !== brandName) return false;
@@ -60,26 +80,32 @@
     const allProposals = [];
     const allRejections = [];
     const failedBatches = [];
-    for (let i = 0; i < batches.length; i++) {
-      if (onProgress) onProgress({ done: i, total: batches.length });
-      try {
-        const data = await postJson('/api/propose/merges', {
-          brand_name: brandName,
-          category_full_name: categoryFullName,
-          gold_models: goldModels,
-          candidate_clusters: batches[i],
-        });
+    let done = 0;
+    if (onProgress) onProgress({ done: 0, total: batches.length });
+    const settled = await mapLimit(batches, 4, async (batch, i) => {
+      const data = await postJson('/api/propose/merges', {
+        brand_name: brandName,
+        category_full_name: categoryFullName,
+        gold_models: goldModels,
+        candidate_clusters: batch,
+      });
+      done++;
+      if (onProgress) onProgress({ done, total: batches.length });
+      return { data, i };
+    });
+    for (const r of settled) {
+      if (r.ok) {
+        const { data } = r.value;
         if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
         if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
-      } catch (e) {
-        failedBatches.push({ index: i, error: e.message });
+      } else {
+        failedBatches.push({ error: r.error.message });
       }
     }
-    if (onProgress) onProgress({ done: batches.length, total: batches.length });
     return { proposals: allProposals, rejections: allRejections, batches: batches.length, failedBatches };
   }
 
-  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, categoryConvention, onProgress }) {
+  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, categoryConvention, enableWebSearch, researchDirective, onProgress }) {
     const rejected = await Storage.getRejections();
     const conv = convention || (brandId != null ? await Storage.loadConvention(brandId, categoryId) : null);
     const goldModels = Clustering.selectGoldModels(models);
@@ -90,24 +116,37 @@
     const allProposals = [];
     const allRejections = [];
     const failedBatches = [];
-    for (let i = 0; i < batches.length; i++) {
-      if (onProgress) onProgress({ done: i, total: batches.length });
-      try {
-        const data = await postJson('/api/propose/renames', {
-          brand_name: brandName,
-          category_full_name: categoryFullName,
-          convention: conv,
-          category_convention: categoryConvention || null,
-          gold_models: goldModels,
-          candidates: batches[i],
-        });
+    let done = 0;
+    if (onProgress) onProgress({ done: 0, total: batches.length });
+    // Web research narrows the safe parallelism budget -- each request may
+    // spawn up to ~5 web_search calls server-side, and Anthropic counts those
+    // against the same per-account rate limit. Keep the cap at 2 when research
+    // is on; 4 otherwise.
+    const concurrency = enableWebSearch ? 2 : 4;
+    const settled = await mapLimit(batches, concurrency, async (batch, i) => {
+      const data = await postJson('/api/propose/renames', {
+        brand_name: brandName,
+        category_full_name: categoryFullName,
+        convention: conv,
+        category_convention: categoryConvention || null,
+        gold_models: goldModels,
+        candidates: batch,
+        enable_web_search: !!enableWebSearch,
+        research_directive: researchDirective || null,
+      });
+      done++;
+      if (onProgress) onProgress({ done, total: batches.length });
+      return { data, i };
+    });
+    for (const r of settled) {
+      if (r.ok) {
+        const { data } = r.value;
         if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
         if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
-      } catch (e) {
-        failedBatches.push({ index: i, error: e.message });
+      } else {
+        failedBatches.push({ error: r.error.message });
       }
     }
-    if (onProgress) onProgress({ done: batches.length, total: batches.length });
     return { proposals: allProposals, rejections: allRejections, batches: batches.length, convention: conv, failedBatches };
   }
 

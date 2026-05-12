@@ -203,12 +203,31 @@ by brand). For each brand:
 Requires a saved naming convention for the brand+category. If missing, the brand is
 listed as "skipped — run Inspect Naming Conventions first."
 
-For each brand with a saved convention:
+Click **Find Renames** to open a small pre-run modal:
+
+- **Enable web research** (checkbox, off by default). Adds Anthropic's
+  `web_search_20250305` server tool to the rename call so the LLM can fill
+  convention-required information that the candidate's name doesn't carry
+  (e.g., identifying that a bat is **Composite** vs **Alloy** when the name
+  alone is ambiguous). Costs a fraction of a cent per search, billed by
+  Anthropic.
+- **Research directive** (textarea, appears when the checkbox is ticked). A
+  one-line instruction the LLM follows in addition to the saved convention,
+  e.g. *"Identify Material (Composite / Alloy / Hybrid) where the name
+  doesn't already include one."* Not persisted — fresh each run.
+
+When the operator clicks **Start**, for each brand with a saved convention:
 
 1. Gold models + the convention go to the LLM along with up to 50 candidate models per
    batch (filtered by token-overlap-with-gold-vocabulary as a coarse pre-filter).
-2. The LLM returns proposed canonical names with reasoning, or a refusal.
-3. Same review modal as merges, but the editable target is the proposed `new_name`.
+2. Batches dispatch in parallel with a small concurrency cap (4 normally, 2
+   when web research is on so the per-request web_search budget doesn't
+   blow through Anthropic's rate limit). The static prefix (system prompt +
+   conventions + gold models) is marked `cache_control: ephemeral` so every
+   batch after the first reads it from Anthropic's prompt cache.
+3. The LLM returns proposed canonical names with reasoning (and source URLs
+   when web research surfaced them), or a refusal.
+4. Same review modal as merges, but the editable target is the proposed `new_name`.
 
 ### 4. Inspect Naming Conventions
 
@@ -345,12 +364,18 @@ Filename pattern: `merch-update-<sport>-<YYYY-MM-DD>-<HHMMSS>.csv`.
 | Endpoint | Model | Purpose |
 | --- | --- | --- |
 | `POST /api/propose/merges` | `claude-sonnet-4-5-20250929` | For each anchor cluster, pick the best merge target or refuse. |
-| `POST /api/propose/renames` | `claude-sonnet-4-5-20250929` | For each candidate, propose a canonical name or refuse. |
+| `POST /api/propose/renames` | `claude-sonnet-4-5-20250929` | For each candidate, propose a canonical name or refuse. Accepts `enable_web_search: true` + `research_directive: string` to opt the request into Anthropic's `web_search_20250305` server tool. |
 | `POST /api/propose/conventions` | `claude-opus-4-5` | Codify a brand+category naming convention from gold models. |
 
 Each endpoint holds its own system prompt at the top of the file. The model ids are
 pinned in `api/anthropic.js` as `SONNET_MODEL` / `OPUS_MODEL` so swaps happen in one
-place.
+place. The merges and renames endpoints attach `cache_control: { type: 'ephemeral' }`
+to the system prompt and the static portion of the user message (brand / category /
+gold models / convention) so Anthropic's prompt cache absorbs the static prefix
+across batches in a single run. `callAnthropic` (in `api/anthropic.js`) accepts an
+optional `tools` array that the renames endpoint sets to
+`[{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }]` when the
+operator opts into research.
 
 The Anthropic API key is **server-side only** (`ANTHROPIC_API_KEY` env var). It is
 never exposed to the browser.

@@ -41,8 +41,20 @@ Return JSON only matching this exact shape:
 
 Every candidate in the input MUST appear in either proposals or rejections. Do not invent ids.`;
 
-function buildUserMessage({ brand_name, category_full_name, convention, category_convention, candidates, gold_models }) {
-  return [
+// Optional addendum appended to the system prompt when the operator enables
+// web research from the pre-run modal. Anthropic's web_search_20250305 server
+// tool is added in the request body separately; this paragraph tells the
+// model when to reach for it and how to report citations.
+const RESEARCH_ADDENDUM = `
+
+You have access to the web_search tool. Use it selectively to fill convention-required information that the candidate's current name does not carry -- the operator will give you a research_directive describing exactly what to look up (e.g., the bat's Material). Do not search for information the name already contains. Do not fabricate facts. If a quick search does not produce a confident, well-sourced answer, refuse the rename and explain. When you do use a search result, cite the source URL inline in the proposal's reasoning field.`;
+
+// Split into static prefix (brand / category / conventions / gold models /
+// optional research directive) and variable suffix (the candidate list).
+// The prefix gets cache_control: ephemeral so Anthropic caches it across
+// batches in a single run. The candidate list re-tokenizes each batch.
+function buildStaticPrefix({ brand_name, category_full_name, convention, category_convention, gold_models, research_directive }) {
+  const lines = [
     `Brand: ${brand_name}`,
     `Category: ${category_full_name}`,
     '',
@@ -54,6 +66,15 @@ function buildUserMessage({ brand_name, category_full_name, convention, category
     '',
     `Gold-standard models (reference for canonical naming, ${(gold_models || []).length}):`,
     JSON.stringify(gold_models || [], null, 2),
+  ];
+  if (research_directive) {
+    lines.push('', `Research directive (from operator):`, research_directive);
+  }
+  return lines.join('\n');
+}
+
+function buildVariableSuffix({ candidates }) {
+  return [
     '',
     `Candidates to evaluate (${(candidates || []).length}):`,
     JSON.stringify(candidates || [], null, 2),
@@ -78,13 +99,25 @@ export default async function handler(req) {
     return json({ proposals: [], rejections: [] });
   }
 
+  const wantsResearch = !!payload.enable_web_search;
+  const systemText = wantsResearch ? SYSTEM_PROMPT + RESEARCH_ADDENDUM : SYSTEM_PROMPT;
+  const tools = wantsResearch
+    ? [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }]
+    : undefined;
+
   try {
     const { text } = await callAnthropic({
       model: SONNET_MODEL,
-      system: SYSTEM_PROMPT,
-      user: buildUserMessage(payload),
+      system: [
+        { type: 'text', text: systemText, cache_control: { type: 'ephemeral' } },
+      ],
+      user: [
+        { type: 'text', text: buildStaticPrefix(payload), cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: buildVariableSuffix(payload) },
+      ],
       max_tokens: 4096,
       temperature: 0.1,
+      tools,
     });
     const parsed = extractJson(text);
     return json({
