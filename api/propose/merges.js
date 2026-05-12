@@ -42,19 +42,31 @@ Return JSON only matching this exact shape:
 
 Every anchor in the input MUST appear in either proposals or rejections. Do not invent ids — use ids from the input.`;
 
+// Optional addendum appended to the system prompt when the operator enables
+// web research from the pre-run modal. Anthropic's web_search_20250305 server
+// tool is added in the request body separately; this paragraph tells the
+// model when to reach for it.
+const RESEARCH_ADDENDUM = `
+
+You have access to the web_search tool. Use it selectively to disambiguate merge candidates when the gold-model context alone is insufficient -- the operator will give you a research_directive describing what to look up (e.g., whether a specific bat model is Composite or Alloy so it folds into the correct parent). Do not search for information already implied by the inputs. Do not fabricate facts. If a quick search does not produce a confident, well-sourced answer, refuse the merge and explain. When you do use a search result, cite the source URL inline in the proposal's reasoning field.`;
+
 // Split into static prefix + variable suffix so the prefix can be marked
 // with cache_control: ephemeral. Anthropic prompt caching keys on content
 // hash, so as long as the brand / category / gold models are identical
 // across batches in a single run, every batch after the first reads the
 // cached prefix and only the candidate clusters get re-tokenized.
-function buildStaticPrefix({ brand_name, category_full_name, gold_models }) {
-  return [
+function buildStaticPrefix({ brand_name, category_full_name, gold_models, research_directive }) {
+  const lines = [
     `Brand: ${brand_name}`,
     `Category: ${category_full_name}`,
     '',
     `Gold-standard models (${(gold_models || []).length}):`,
     JSON.stringify(gold_models || [], null, 2),
-  ].join('\n');
+  ];
+  if (research_directive) {
+    lines.push('', `Research directive (from operator):`, research_directive);
+  }
+  return lines.join('\n');
 }
 
 function buildVariableSuffix({ candidate_clusters }) {
@@ -83,11 +95,17 @@ export default async function handler(req) {
     return json({ proposals: [], rejections: [] });
   }
 
+  const wantsResearch = !!payload.enable_web_search;
+  const systemText = wantsResearch ? SYSTEM_PROMPT + RESEARCH_ADDENDUM : SYSTEM_PROMPT;
+  const tools = wantsResearch
+    ? [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }]
+    : undefined;
+
   try {
     const { text } = await callAnthropic({
       model: SONNET_MODEL,
       system: [
-        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: systemText, cache_control: { type: 'ephemeral' } },
       ],
       user: [
         { type: 'text', text: buildStaticPrefix(payload), cache_control: { type: 'ephemeral' } },
@@ -95,6 +113,7 @@ export default async function handler(req) {
       ],
       max_tokens: 4096,
       temperature: 0.1,
+      tools,
     });
     const parsed = extractJson(text);
     return json({

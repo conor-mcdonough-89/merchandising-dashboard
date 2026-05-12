@@ -43,6 +43,127 @@
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
   const SPORTS_META_KEY = 'merch-sports-meta'; // cached sport id->name map
 
+  // -------- Jobs registry --------
+  // Tracks long-running LLM dispatches (Find Merges, Find Renames) so the
+  // operator can see what's in flight and cancel it. Each job carries an
+  // AbortController whose signal flows down through Proposals -> mapLimit
+  // -> fetch. Cancellation aborts un-dispatched batches immediately; in-flight
+  // fetches abort client-side (Anthropic may still bill the server-side
+  // generation for batches already mid-call -- see CLAUDE.md).
+  const _jobs = new Map();
+  let _jobSeq = 0;
+  const _jobSubs = new Set();
+  function notifyJobs() { for (const fn of _jobSubs) fn(); }
+  const Jobs = {
+    start({ kind, label }) {
+      const id = ++_jobSeq;
+      const controller = new AbortController();
+      _jobs.set(id, {
+        id, kind, label, status: 'running',
+        progress: { done: 0, total: 0, detail: '' },
+        startedAt: Date.now(),
+        controller,
+      });
+      notifyJobs();
+      return { id, signal: controller.signal };
+    },
+    update(id, patch) {
+      const job = _jobs.get(id);
+      if (!job) return;
+      if (patch.progress) job.progress = { ...job.progress, ...patch.progress };
+      if (patch.label) job.label = patch.label;
+      notifyJobs();
+    },
+    finish(id, { status = 'done' } = {}) {
+      const job = _jobs.get(id);
+      if (!job) return;
+      job.status = status;
+      _jobs.delete(id);
+      notifyJobs();
+    },
+    cancel(id) {
+      const job = _jobs.get(id);
+      if (!job || job.status !== 'running') return;
+      job.status = 'cancelling';
+      try { job.controller.abort(); } catch (_) {}
+      notifyJobs();
+    },
+    list() {
+      return Array.from(_jobs.values()).sort((a, b) => a.startedAt - b.startedAt);
+    },
+    subscribe(fn) {
+      _jobSubs.add(fn);
+      return () => _jobSubs.delete(fn);
+    },
+  };
+
+  function renderJobsPill() {
+    const btn = document.getElementById('open-jobs');
+    const badge = document.getElementById('jobs-count');
+    if (!btn) return;
+    const list = Jobs.list();
+    if (!list.length) {
+      btn.classList.add('hidden');
+      setJobsPopover(false);
+    } else {
+      btn.classList.remove('hidden');
+      if (badge) badge.textContent = String(list.length);
+    }
+    renderJobsPopoverBody();
+  }
+  function setJobsPopover(open) {
+    const pop = document.getElementById('jobs-popover');
+    if (!pop) return;
+    pop.classList.toggle('hidden', !open);
+  }
+  function toggleJobsPopover() {
+    const pop = document.getElementById('jobs-popover');
+    if (!pop) return;
+    setJobsPopover(pop.classList.contains('hidden'));
+  }
+  function dismissJobsPopoverOnOutsideClick(e) {
+    const pop = document.getElementById('jobs-popover');
+    const btn = document.getElementById('open-jobs');
+    if (!pop || pop.classList.contains('hidden')) return;
+    if (pop.contains(e.target)) return;
+    if (btn && btn.contains(e.target)) return;
+    setJobsPopover(false);
+  }
+  function renderJobsPopoverBody() {
+    const body = document.getElementById('jobs-popover-body');
+    if (!body) return;
+    const list = Jobs.list();
+    if (!list.length) {
+      body.innerHTML = `<p class="muted small" style="padding: 12px;">No running jobs.</p>`;
+      return;
+    }
+    body.innerHTML = list.map((j) => {
+      const { done, total, detail } = j.progress || {};
+      const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+      const elapsed = Math.round((Date.now() - j.startedAt) / 1000);
+      const cancelDisabled = j.status !== 'running';
+      const statusLabel = j.status === 'cancelling' ? 'cancelling…' : (total ? `${done}/${total}` : 'starting…');
+      return `
+        <div class="job-row" data-job-id="${j.id}">
+          <div class="job-row-head">
+            <span class="job-row-label">${escapeHtml(j.label)}</span>
+            <button class="ghost small" data-cancel-job="${j.id}" ${cancelDisabled ? 'disabled' : ''}>${cancelDisabled ? 'Cancelling' : 'Cancel'}</button>
+          </div>
+          <div class="job-row-progress"><div class="job-row-bar" style="width:${pct}%"></div></div>
+          <div class="job-row-meta muted small">
+            ${escapeHtml(detail || '')} · ${escapeHtml(statusLabel)} · ${elapsed}s
+          </div>
+        </div>
+      `;
+    }).join('');
+    body.querySelectorAll('[data-cancel-job]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const id = Number(b.getAttribute('data-cancel-job'));
+        Jobs.cancel(id);
+      });
+    });
+  }
+
   // Convention modal state. Per-card edit drafts, keyed by convention key
   // (brand: `${brandId}::${categoryId}`, category: `category::${categoryId}`).
   // The map survives partial re-renders of the modal so editing one card
@@ -80,6 +201,11 @@
     document.getElementById('open-sync').addEventListener('click', () => openSyncModal());
     document.getElementById('open-sheet').addEventListener('click', toggleSheet);
     document.getElementById('open-settings').addEventListener('click', openSettingsModal);
+    document.getElementById('open-jobs').addEventListener('click', toggleJobsPopover);
+    document.querySelectorAll('[data-jobs-close]').forEach((b) => b.addEventListener('click', () => setJobsPopover(false)));
+    document.addEventListener('click', dismissJobsPopoverOnOutsideClick, true);
+    Jobs.subscribe(renderJobsPill);
+    renderJobsPill();
     document.getElementById('close-sheet').addEventListener('click', closeSheet);
     document.getElementById('push-to-sheets').addEventListener('click', pushSheetToGoogle);
     document.getElementById('refresh-from-sheet').addEventListener('click', refreshFromSheetClicked);
@@ -391,7 +517,7 @@
       setMode(next);
     });
 
-    main.querySelector('#skill-merges').addEventListener('click', () => runFindMerges(cat));
+    main.querySelector('#skill-merges').addEventListener('click', () => openMergeRunModal(cat));
     main.querySelector('#skill-renames').addEventListener('click', () => openRenameRunModal(cat));
     main.querySelector('#skill-conventions').addEventListener('click', () => runInspectConventions(cat));
 
@@ -971,7 +1097,47 @@
 
   // -------- skill: find merges --------
 
-  async function runFindMerges(cat) {
+  // Pre-run modal for Find Merges. Mirrors openRenameRunModal -- confirms the
+  // operator's click (avoids costly accidental runs) and exposes the same
+  // opt-in web-research toggle + directive.
+  function openMergeRunModal(cat) {
+    const overlay = document.getElementById('merge-run-modal');
+    if (!overlay) {
+      return runFindMerges(cat, { enableWebSearch: false, researchDirective: '' });
+    }
+    const models = filteredModels(cat);
+    const summary = overlay.querySelector('[data-merge-run-summary]');
+    const brandFilterLabel = _filters.brand === 'all' ? 'all brands' : _filters.brand;
+    if (summary) {
+      summary.textContent = `Category: ${cat.fullName || cat.name} · Brand filter: ${brandFilterLabel} · ${models.length} model${models.length === 1 ? '' : 's'} in scope`;
+    }
+    const enableBox = overlay.querySelector('#merge-run-enable-research');
+    const directiveBox = overlay.querySelector('#merge-run-directive');
+    const directiveWrap = overlay.querySelector('[data-merge-run-directive-wrap]');
+    if (enableBox) enableBox.checked = false;
+    if (directiveBox) directiveBox.value = '';
+    if (directiveWrap) directiveWrap.style.display = 'none';
+    if (enableBox && directiveWrap) {
+      enableBox.onchange = () => {
+        directiveWrap.style.display = enableBox.checked ? 'block' : 'none';
+        if (enableBox.checked && directiveBox) directiveBox.focus();
+      };
+    }
+    const closeBtn = overlay.querySelector('[data-merge-run-cancel]');
+    const submitBtn = overlay.querySelector('[data-merge-run-submit]');
+    if (closeBtn) closeBtn.onclick = () => closeModal('merge-run-modal');
+    if (submitBtn) submitBtn.onclick = () => {
+      const enableWebSearch = !!(enableBox && enableBox.checked);
+      const researchDirective = enableWebSearch && directiveBox ? (directiveBox.value || '').trim() : '';
+      closeModal('merge-run-modal');
+      runFindMerges(cat, { enableWebSearch, researchDirective });
+    };
+    openModal('merge-run-modal');
+  }
+
+  async function runFindMerges(cat, opts = {}) {
+    const enableWebSearch = !!opts.enableWebSearch;
+    const researchDirective = opts.researchDirective || '';
     const models = filteredModels(cat);
     if (!models.length) return toast('No models match the current filters.', 'error');
     const totalCount = (cat.models || []).length;
@@ -980,19 +1146,28 @@
     const grouped = Proposals.groupByBrandCategory(models);
     openProposalModal('Finding merges...', `<div style="padding:24px;text-align:center;"><span class="spinner"></span> Clustering ${models.length.toLocaleString()} models across ${grouped.length} brands${escapeHtml(filterNote)}...</div>`);
 
+    const job = Jobs.start({ kind: 'merges', label: `Find Merges · ${cat.fullName || cat.name}` });
     let allProposals = [];
     let allRejections = [];
     const allFailures = [];
+    let cancelled = false;
     try {
       for (const g of grouped) {
+        if (job.signal.aborted) { cancelled = true; break; }
+        Jobs.update(job.id, { progress: { detail: `Brand "${g.brandName}"` } });
         const result = await Proposals.proposeMerges({
           brandName: g.brandName,
           categoryFullName: g.categoryFullName,
           models: g.models,
+          enableWebSearch,
+          researchDirective,
+          signal: job.signal,
           onProgress: (p) => {
-            updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}`);
+            Jobs.update(job.id, { progress: { done: p.done, total: p.total, detail: `Brand "${g.brandName}"` } });
+            updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}${enableWebSearch ? ' (web research on)' : ''}`);
           },
         });
+        if (result.aborted) { cancelled = true; break; }
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
         if (result.failedBatches && result.failedBatches.length) {
@@ -1000,8 +1175,15 @@
         }
       }
     } catch (e) {
+      Jobs.finish(job.id, { status: 'error' });
       closeModal('proposal-modal');
       return toast('Merge proposal failed: ' + e.message, 'error');
+    }
+    Jobs.finish(job.id, { status: cancelled ? 'cancelled' : 'done' });
+
+    if (cancelled) {
+      closeModal('proposal-modal');
+      return toast('Find Merges cancelled.', 'info');
     }
 
     if (allFailures.length) {
@@ -1082,17 +1264,21 @@
     const brandConvByKey = new Map((convPayload.brands || []).map((b) => [b.key, b]));
     const categoryConvention = convPayload.category || null;
 
+    const job = Jobs.start({ kind: 'renames', label: `Find Renames · ${cat.fullName || cat.name}` });
     let allProposals = [];
     let allRejections = [];
     let missingConvention = [];
     const allFailures = [];
+    let cancelled = false;
     try {
       for (const g of grouped) {
+        if (job.signal.aborted) { cancelled = true; break; }
         const conv = brandConvByKey.get(`${g.brandId}::${cat.id}`) || await Storage.loadConvention(g.brandId, g.categoryId);
         if (!conv) {
           missingConvention.push(g.brandName);
           continue;
         }
+        Jobs.update(job.id, { progress: { detail: `Brand "${g.brandName}"` } });
         const result = await Proposals.proposeRenames({
           brandName: g.brandName,
           brandId: g.brandId,
@@ -1103,8 +1289,13 @@
           categoryConvention,
           enableWebSearch,
           researchDirective,
-          onProgress: (p) => updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}${enableWebSearch ? ' (web research on)' : ''}`),
+          signal: job.signal,
+          onProgress: (p) => {
+            Jobs.update(job.id, { progress: { done: p.done, total: p.total, detail: `Brand "${g.brandName}"` } });
+            updateProposalProgress(`Brand "${g.brandName}": batch ${p.done}/${p.total}${enableWebSearch ? ' (web research on)' : ''}`);
+          },
         });
+        if (result.aborted) { cancelled = true; break; }
         allProposals.push(...result.proposals.map((p) => ({ ...p, brandName: g.brandName, categoryFullName: g.categoryFullName, brandId: g.brandId, categoryId: g.categoryId })));
         allRejections.push(...result.rejections);
         if (result.failedBatches && result.failedBatches.length) {
@@ -1112,8 +1303,15 @@
         }
       }
     } catch (e) {
+      Jobs.finish(job.id, { status: 'error' });
       closeModal('proposal-modal');
       return toast('Rename proposal failed: ' + e.message, 'error');
+    }
+    Jobs.finish(job.id, { status: cancelled ? 'cancelled' : 'done' });
+
+    if (cancelled) {
+      closeModal('proposal-modal');
+      return toast('Find Renames cancelled.', 'info');
     }
 
     if (allFailures.length) {

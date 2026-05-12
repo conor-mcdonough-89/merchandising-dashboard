@@ -4,11 +4,12 @@
 
 (function (global) {
 
-  async function postJson(url, body) {
+  async function postJson(url, body, signal) {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
     if (!res.ok) {
       let msg = `POST ${url} ${res.status}`;
@@ -26,11 +27,12 @@
   // dispatch per-batch LLM calls in parallel without overwhelming Anthropic's
   // rate limit. The first batch primes Anthropic's prompt cache; subsequent
   // batches hit it -- parallelism + caching compound rather than fight.
-  async function mapLimit(items, limit, fn) {
+  async function mapLimit(items, limit, fn, signal) {
     const results = new Array(items.length);
     let idx = 0;
     const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
       while (true) {
+        if (signal && signal.aborted) return;
         const i = idx++;
         if (i >= items.length) return;
         try { results[i] = { ok: true, value: await fn(items[i], i) }; }
@@ -39,6 +41,10 @@
     });
     await Promise.all(workers);
     return results;
+  }
+
+  function isAbortError(e) {
+    return e && (e.name === 'AbortError' || (e.message || '').toLowerCase().includes('abort'));
   }
 
   function buildSlice(models, { brandName = null, categoryId = null } = {}) {
@@ -70,7 +76,7 @@
 
   // Propose merges across a slice. The slice should already be scoped to
   // a single category (and ideally a single brand for tighter clusters).
-  async function proposeMerges({ brandName, categoryFullName, models, onProgress }) {
+  async function proposeMerges({ brandName, categoryFullName, models, enableWebSearch, researchDirective, onProgress, signal }) {
     const rejected = await Storage.getRejections();
     const goldModels = Clustering.selectGoldModels(models);
     const clusters = Clustering.findMergeCandidates(models, { excludeIds: rejected });
@@ -82,30 +88,37 @@
     const failedBatches = [];
     let done = 0;
     if (onProgress) onProgress({ done: 0, total: batches.length });
-    const settled = await mapLimit(batches, 4, async (batch, i) => {
+    const concurrency = enableWebSearch ? 2 : 4;
+    const settled = await mapLimit(batches, concurrency, async (batch, i) => {
       const data = await postJson('/api/propose/merges', {
         brand_name: brandName,
         category_full_name: categoryFullName,
         gold_models: goldModels,
         candidate_clusters: batch,
-      });
+        enable_web_search: !!enableWebSearch,
+        research_directive: researchDirective || null,
+      }, signal);
       done++;
       if (onProgress) onProgress({ done, total: batches.length });
       return { data, i };
-    });
+    }, signal);
+    let aborted = !!(signal && signal.aborted);
     for (const r of settled) {
+      if (!r) continue;
       if (r.ok) {
         const { data } = r.value;
         if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
         if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      } else if (isAbortError(r.error)) {
+        aborted = true;
       } else {
         failedBatches.push({ error: r.error.message });
       }
     }
-    return { proposals: allProposals, rejections: allRejections, batches: batches.length, failedBatches };
+    return { proposals: allProposals, rejections: allRejections, batches: batches.length, failedBatches, aborted };
   }
 
-  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, categoryConvention, enableWebSearch, researchDirective, onProgress }) {
+  async function proposeRenames({ brandName, brandId, categoryFullName, categoryId, models, convention, categoryConvention, enableWebSearch, researchDirective, onProgress, signal }) {
     const rejected = await Storage.getRejections();
     const conv = convention || (brandId != null ? await Storage.loadConvention(brandId, categoryId) : null);
     const goldModels = Clustering.selectGoldModels(models);
@@ -133,21 +146,25 @@
         candidates: batch,
         enable_web_search: !!enableWebSearch,
         research_directive: researchDirective || null,
-      });
+      }, signal);
       done++;
       if (onProgress) onProgress({ done, total: batches.length });
       return { data, i };
-    });
+    }, signal);
+    let aborted = !!(signal && signal.aborted);
     for (const r of settled) {
+      if (!r) continue;
       if (r.ok) {
         const { data } = r.value;
         if (Array.isArray(data.proposals)) allProposals.push(...data.proposals);
         if (Array.isArray(data.rejections)) allRejections.push(...data.rejections);
+      } else if (isAbortError(r.error)) {
+        aborted = true;
       } else {
         failedBatches.push({ error: r.error.message });
       }
     }
-    return { proposals: allProposals, rejections: allRejections, batches: batches.length, convention: conv, failedBatches };
+    return { proposals: allProposals, rejections: allRejections, batches: batches.length, convention: conv, failedBatches, aborted };
   }
 
   async function inferConvention({ brandName, brandId, categoryFullName, categoryId, models }) {

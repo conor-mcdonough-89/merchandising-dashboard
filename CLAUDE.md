@@ -17,7 +17,7 @@ to the catalog.
 
 | File | Role |
 | --- | --- |
-| `index.html` | Single-page shell. Password gate, sync overlay, proposal-review modal, convention modal, settings modal (Google Sheets), confirm dialog, sheet side-panel, toasts. Loads scripts in order: `storage.js`, `metabase.js`, `sheets.js`, `clustering.js`, `proposals.js`, `dashboard.js`. |
+| `index.html` | Single-page shell. Password gate, sync overlay, proposal-review modal, convention modal, settings modal (Google Sheets), Find Merges / Find Renames pre-run modals, confirm dialog, sheet side-panel, jobs popover, toasts. Loads scripts in order: `storage.js`, `metabase.js`, `sheets.js`, `clustering.js`, `proposals.js`, `dashboard.js`. |
 | `dashboard.js` | All UI rendering. `Dashboard.init()` is the entry point. Owns the sport-filter pill row, the relatable-category grid, the category panel (filter toolbar + mode toolbar + sortable model table), Browse / Merge Mode / Rename Mode flows, LLM skill flows, proposal review modal, sheet builder, CSV export, Google Sheets settings. Holds the shared `BULK_IMPORT_HEADERS` constant and row-builder used by both CSV export and Sheets append. |
 | `metabase.js` | Metabase client. BigQuery SQL templates (sports + relatable categories + models-for-category), session-token auth with API-key fallback, `/api/dataset/json` streaming for full result sets. All HTTP through `/api/metabase/*`. |
 | `sheets.js` | Google Sheets client (browser-side). PKCE OAuth popup flow, token storage in localStorage, `Sheets.startAuth`, `Sheets.disconnect`, `Sheets.isConnected`, `Sheets.loadBinding`, `Sheets.createSheet`, `Sheets.appendRows`. All HTTP through `/api/google/*`. |
@@ -185,8 +185,17 @@ rows are grouped by `category_id` and saved as one synced category per group.
 
 ### 2. Find merges
 
-In a category panel, **Find Merges** runs per-brand (clusters are tighter when scoped
-by brand). For each brand:
+In a category panel, **Find Merges** opens a small pre-run modal (mirrors the
+rename one): summary of the in-scope models, **Enable web research**
+checkbox, and an optional **research directive** textarea. The checkbox
+toggles Anthropic's `web_search_20250305` server tool on the merges
+endpoint so the LLM can disambiguate ambiguous candidates (e.g., confirm
+Composite vs Alloy before folding into the right parent). Click **Start**
+to run; the run is registered as a job in the header **Jobs** pill and
+can be cancelled.
+
+When the run starts, it processes per-brand (clusters are tighter when
+scoped by brand). For each brand:
 
 1. `Clustering.selectGoldModels(models)` picks `available` models with
    `sold_count >= 20`, capped at 50 by sales.
@@ -194,7 +203,10 @@ by brand). For each brand:
    low-confidence-available models. For each anchor, finds neighbors with
    `jaroWinkler ≥ 0.75` OR `tokenSetOverlap ≥ 0.6`, top 5.
 3. Clusters are packed into batches of 25 anchors and POSTed to `/api/propose/merges`
-   along with the gold models.
+   along with the gold models. Batches dispatch in parallel (concurrency
+   4 normally, 2 with web research on). The static prefix is
+   `cache_control: ephemeral` so subsequent batches read it from
+   Anthropic's prompt cache.
 4. The LLM returns `{ proposals, rejections }`. Proposals show in the review modal
    with `confidence ≥ 0.85` pre-marked Approve.
 
@@ -246,7 +258,21 @@ Both cards persist to **Supabase** via `/api/conventions/upsert`; IndexedDB is a
 read-through cache so the modal still renders when the backend is down (with a
 "using cached conventions" banner and Save disabled).
 
-### 5. The category panel (model table + modes)
+### 5. Jobs (running LLM runs)
+
+Find Merges and Find Renames are registered as **jobs** while they're
+in flight. The header pill **Jobs** appears only while at least one job
+is running, with a badge counting how many. Clicking it opens a popover
+listing each job (label, brand-in-progress, batch progress, elapsed
+seconds) plus a **Cancel** button per row. Cancel calls
+`AbortController.abort()`; the signal threads through
+`Proposals.proposeMerges`/`Renames` → `mapLimit` → `fetch(..., { signal })`.
+Un-dispatched batches exit immediately; in-flight `fetch`es abort
+client-side, but Anthropic may still bill the server-side generation
+for batches already mid-call. The cancelled run shows a "cancelled"
+toast and the proposal modal closes without rendering partial results.
+
+### 6. The category panel (model table + modes)
 
 The category panel shows every model attached to that relatable category in a
 sortable, filterable table. Toolbars stack above:
@@ -292,7 +318,7 @@ panel header. BigQuery is one-day stale, so the signifier is the
 operator's only way to see that a model is already queued before BQ
 catches up.
 
-### 6. Sheet → CSV / live Sheets sync
+### 7. Sheet → CSV / live Sheets sync
 
 Each approved proposal — manual (Merge Mode / Rename Mode) or LLM-driven —
 becomes a row in the `sheet` IndexedDB store. The header button **Sheet** opens

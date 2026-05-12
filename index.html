@@ -29,12 +29,26 @@
     <div class="brand">SidelineSwap <span class="accent">Merch</span></div>
     <div id="conn-state" class="muted small"></div>
     <div class="spacer"></div>
+    <button class="header-action hidden" id="open-jobs" title="Running LLM jobs">
+      <span class="spinner-dot"></span> Jobs <span class="badge" id="jobs-count">0</span>
+    </button>
     <button class="header-action" id="open-sync" title="Sync from Metabase">↻ Sync</button>
     <button class="header-action" id="open-settings" title="Settings (Google Sheets)">⚙ Settings</button>
     <button class="header-action" id="open-sheet" title="View in-progress bulk import sheet">
       Sheet <span class="badge" id="sheet-count">0</span>
     </button>
   </header>
+
+  <div class="jobs-popover hidden" id="jobs-popover" role="dialog" aria-label="Running jobs">
+    <header>
+      <h3>Running jobs</h3>
+      <button class="header-action" data-jobs-close>Close</button>
+    </header>
+    <div id="jobs-popover-body"></div>
+    <footer class="muted small">
+      Cancelling stops batches that haven't been dispatched yet. In-flight batches may still be billed by Anthropic.
+    </footer>
+  </div>
 
   <div class="sport-filter" id="sport-filter"></div>
 
@@ -199,6 +213,38 @@
         <div class="spacer"></div>
         <button class="ghost" data-rename-run-cancel>Cancel</button>
         <button class="primary" data-rename-run-submit>Start</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Find Merges pre-run modal: confirm + opt-in web research + directive -->
+  <div class="modal-backdrop hidden" id="merge-run-modal">
+    <div class="modal" style="max-width: 520px;">
+      <header>
+        <h2>Find Merges</h2>
+        <button class="close" data-merge-run-cancel>×</button>
+      </header>
+      <div class="body" style="padding: 18px 22px;">
+        <p class="muted small" data-merge-run-summary style="margin-bottom: 14px;"></p>
+        <label class="row-flex" style="gap: 8px; margin-bottom: 10px; cursor: pointer;">
+          <input type="checkbox" id="merge-run-enable-research">
+          <span><strong>Enable web research</strong> <span class="muted small">(uses Anthropic web_search)</span></span>
+        </label>
+        <p class="muted small" style="margin-bottom: 14px;">
+          When on, the LLM may use web_search to disambiguate ambiguous merge candidates (e.g., confirming whether a bat is Composite or Alloy before folding it into the right parent). Adds latency and a small per-search cost. Off by default.
+        </p>
+        <div data-merge-run-directive-wrap style="display: none;">
+          <label for="merge-run-directive" class="small" style="display:block;margin-bottom:6px;">Research directive</label>
+          <textarea id="merge-run-directive" rows="3" placeholder="e.g., Confirm Material (Composite / Alloy / Hybrid) before merging models whose name lacks it." style="width: 100%; resize: vertical; font-family: inherit;"></textarea>
+          <p class="muted small" style="margin-top: 6px;">
+            Short instruction the LLM follows alongside the existing gold-model context. Not persisted — fresh each run.
+          </p>
+        </div>
+      </div>
+      <footer>
+        <div class="spacer"></div>
+        <button class="ghost" data-merge-run-cancel>Cancel</button>
+        <button class="primary" data-merge-run-submit>Start</button>
       </footer>
     </div>
   </div>
