@@ -57,7 +57,8 @@
   // Cached relatable categories list for the imagery tool dropdowns. Fetched
   // lazily on first tool activation.
   let _allRelatableCategories = null;
-  let _allSports = null;
+  let _allSports = null;       // sports filtered to those with has_models descendants (Model Imagery)
+  let _allSportsUnfiltered = null; // every sport=1 row (iOS Imagery)
 
   // -------- Jobs registry --------
   // Tracks long-running LLM dispatches (Find Merges, Find Renames) so the
@@ -568,7 +569,7 @@
 
     let loadingError = null;
     try {
-      await ensureSportsAndCategoriesLoaded();
+      if (!_allSportsUnfiltered) _allSportsUnfiltered = await Metabase.fetchAllSports();
     } catch (e) {
       loadingError = e.message;
     }
@@ -583,7 +584,7 @@
       return;
     }
 
-    for (const s of _allSports) {
+    for (const s of _allSportsUnfiltered) {
       const o = document.createElement('option');
       o.value = s.id; o.textContent = s.name;
       sportSel.appendChild(o);

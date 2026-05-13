@@ -249,7 +249,10 @@ ORDER BY
 `.trim();
 
   // Relatable categories under one sport for the iOS Imagery tool.
-  // has_models = 1 ensures we exclude grouping nodes like "Baseball > Catcher's Equipment".
+  // Definition here is "leaf" (no children) rather than has_models=1 -- mobile
+  // imagery is a property of the category itself, so categories without
+  // sellable models still count. Excludes grouping nodes like
+  // "Baseball > Catcher's Equipment" that have child categories underneath.
   const CATEGORY_IMAGERY_SQL_TEMPLATE = `
 SELECT
   c.id,
@@ -258,9 +261,23 @@ SELECT
   c.mobile_image_url,
   c.facet_count
 FROM rails.categories AS c
-WHERE c.has_models = 1
-  AND CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) = __SPORT_ID__
+WHERE CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) = __SPORT_ID__
+  AND c.sport = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM rails.categories AS child
+    WHERE child.parent_id = c.id
+  )
 ORDER BY c.facet_count DESC
+`.trim();
+
+  // Every sport-level root, regardless of whether its subtree has models.
+  // Used by the iOS Imagery tool (mobile imagery doesn't require sellable
+  // models). Model Cleanup keeps the stricter SPORTS_SQL.
+  const ALL_SPORTS_SQL = `
+SELECT id, name, path
+FROM rails.categories
+WHERE sport = 1
+ORDER BY position
 `.trim();
 
   async function fetchImageryModelsForCategory(categoryId) {
@@ -275,6 +292,11 @@ ORDER BY c.facet_count DESC
       rank_position: r.rank_position,
       last_90_sold_count: r.last_90_sold_count || 0,
     }));
+  }
+
+  async function fetchAllSports() {
+    const rows = await runNativeQuery(ALL_SPORTS_SQL);
+    return rows.map((r) => ({ id: String(r.id), name: r.name, path: r.path }));
   }
 
   async function fetchCategoryImageryForSport(sportId) {
@@ -339,6 +361,7 @@ ORDER BY c.facet_count DESC
     ensureAuth,
     testConnection,
     fetchSports,
+    fetchAllSports,
     fetchRelatableCategories,
     fetchModelsForCategory,
     fetchImageryModelsForCategory,
