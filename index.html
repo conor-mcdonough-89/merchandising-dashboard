@@ -32,6 +32,7 @@
     <button class="header-action hidden" id="open-jobs" title="Running LLM jobs">
       <span class="spinner-dot"></span> Jobs <span class="badge" id="jobs-count">0</span>
     </button>
+    <button class="header-action" id="open-tools" title="Open tools tray">☰ Tools</button>
     <button class="header-action" id="open-sync" title="Sync from Metabase">↻ Sync</button>
     <button class="header-action" id="open-settings" title="Settings (Google Sheets)">⚙ Settings</button>
     <button class="header-action" id="open-sheet" title="View in-progress bulk import sheet">
@@ -50,7 +51,30 @@
     </footer>
   </div>
 
-  <div class="sport-filter" id="sport-filter"></div>
+  <div class="sport-filter hidden" id="sport-filter"></div>
+
+  <!-- Tools tray (left-side drawer) -->
+  <aside class="tools-tray" id="tools-tray">
+    <header>
+      <h2>Tools</h2>
+      <button class="close" id="close-tools" style="background:transparent;border:none;color:var(--text-2);font-size:18px;cursor:pointer;">×</button>
+    </header>
+    <div class="body">
+      <button class="tool-item" data-tool="cleanup">
+        <div class="tool-name">Model Cleanup</div>
+        <div class="tool-desc muted small">Merge duplicates, canonicalize names, and queue state changes for bulk import.</div>
+      </button>
+      <button class="tool-item" data-tool="imagery">
+        <div class="tool-name">Model Imagery</div>
+        <div class="tool-desc muted small">Find models missing a primary image, ranked by rank position then 90-day sales.</div>
+      </button>
+      <button class="tool-item" data-tool="category-imagery">
+        <div class="tool-name">Relatable Category iOS Imagery</div>
+        <div class="tool-desc muted small">Find relatable categories under a sport that are missing a mobile (iOS) image.</div>
+      </button>
+    </div>
+  </aside>
+  <div class="tools-tray-backdrop hidden" id="tools-tray-backdrop"></div>
 
   <main id="main"></main>
 
