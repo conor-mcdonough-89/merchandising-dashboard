@@ -230,6 +230,67 @@ WHERE m.state IN ('available', 'pending')
     }));
   }
 
+  // Lightweight model list for the Model Imagery tool. Sorted by rank_position
+  // asc (nulls last), then last_90_sold_count desc.
+  const IMAGERY_MODELS_SQL_TEMPLATE = `
+SELECT
+  m.id,
+  m.name,
+  m.primary_image_url,
+  m.rank_position,
+  m.last_90_sold_count
+FROM rails.models AS m
+WHERE m.state = 'available'
+  AND m.category_id = __CATEGORY_ID__
+ORDER BY
+  CASE WHEN m.rank_position IS NULL THEN 1 ELSE 0 END,
+  m.rank_position ASC,
+  m.last_90_sold_count DESC
+`.trim();
+
+  // Relatable categories under one sport for the iOS Imagery tool.
+  // has_models = 1 ensures we exclude grouping nodes like "Baseball > Catcher's Equipment".
+  const CATEGORY_IMAGERY_SQL_TEMPLATE = `
+SELECT
+  c.id,
+  c.name,
+  c.full_name,
+  c.mobile_image_url,
+  c.facet_count
+FROM rails.categories AS c
+WHERE c.has_models = 1
+  AND CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) = __SPORT_ID__
+ORDER BY c.facet_count DESC
+`.trim();
+
+  async function fetchImageryModelsForCategory(categoryId) {
+    const id = parseInt(categoryId, 10);
+    if (!Number.isFinite(id)) throw new Error(`Invalid category id: ${categoryId}`);
+    const sql = IMAGERY_MODELS_SQL_TEMPLATE.replace('__CATEGORY_ID__', String(id));
+    const rows = await runNativeQuery(sql);
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      primary_image_url: r.primary_image_url,
+      rank_position: r.rank_position,
+      last_90_sold_count: r.last_90_sold_count || 0,
+    }));
+  }
+
+  async function fetchCategoryImageryForSport(sportId) {
+    const id = parseInt(sportId, 10);
+    if (!Number.isFinite(id)) throw new Error(`Invalid sport id: ${sportId}`);
+    const sql = CATEGORY_IMAGERY_SQL_TEMPLATE.replace('__SPORT_ID__', String(id));
+    const rows = await runNativeQuery(sql);
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      fullName: r.full_name,
+      mobile_image_url: r.mobile_image_url,
+      facet_count: r.facet_count || 0,
+    }));
+  }
+
   async function fetchModelsForCategory(categoryId) {
     const id = parseInt(categoryId, 10);
     if (!Number.isFinite(id)) {
@@ -280,6 +341,8 @@ WHERE m.state IN ('available', 'pending')
     fetchSports,
     fetchRelatableCategories,
     fetchModelsForCategory,
+    fetchImageryModelsForCategory,
+    fetchCategoryImageryForSport,
     SPORTS_SQL,
     CATEGORIES_SQL,
     MODELS_SQL_TEMPLATE,

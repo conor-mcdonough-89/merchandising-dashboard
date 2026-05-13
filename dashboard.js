@@ -42,6 +42,22 @@
   const SPORT_FILTER_KEY = 'merch-sport-filter';
   const ACTIVE_CATEGORY_KEY = 'merch-active-category';
   const SPORTS_META_KEY = 'merch-sports-meta'; // cached sport id->name map
+  const ACTIVE_TOOL_KEY = 'merch-active-tool';
+  const IMAGERY_STATE_KEY = 'merch-imagery-state';
+  const CATEGORY_IMAGERY_STATE_KEY = 'merch-category-imagery-state';
+
+  // Which tool is currently active: 'cleanup' (default Model Cleanup),
+  // 'imagery' (Model Imagery), or 'category-imagery' (Relatable Category iOS Imagery).
+  let _activeTool = 'cleanup';
+
+  // Per-tool state for the imagery tools. Persisted to localStorage so a refresh
+  // keeps the last synced view. Shape: { sportId, categoryId?, rows, syncedAt }
+  let _imageryState = null;
+  let _categoryImageryState = null;
+  // Cached relatable categories list for the imagery tool dropdowns. Fetched
+  // lazily on first tool activation.
+  let _allRelatableCategories = null;
+  let _allSports = null;
 
   // -------- Jobs registry --------
   // Tracks long-running LLM dispatches (Find Merges, Find Renames) so the
@@ -189,6 +205,9 @@
     loadCachedSportsMeta();
     _sportFilter = localStorage.getItem(SPORT_FILTER_KEY) || 'all';
     _activeCategoryId = localStorage.getItem(ACTIVE_CATEGORY_KEY) || null;
+    _activeTool = localStorage.getItem(ACTIVE_TOOL_KEY) || 'cleanup';
+    try { _imageryState = JSON.parse(localStorage.getItem(IMAGERY_STATE_KEY) || 'null'); } catch (_) { _imageryState = null; }
+    try { _categoryImageryState = JSON.parse(localStorage.getItem(CATEGORY_IMAGERY_STATE_KEY) || 'null'); } catch (_) { _categoryImageryState = null; }
     await renderSportFilter();
     await refreshSheetCount();
     await renderActive();
@@ -199,6 +218,12 @@
       b.addEventListener('click', () => closeModal(b.getAttribute('data-close')));
     });
     document.getElementById('open-sync').addEventListener('click', () => openSyncModal());
+    document.getElementById('open-tools').addEventListener('click', openToolsTray);
+    document.getElementById('close-tools').addEventListener('click', closeToolsTray);
+    document.getElementById('tools-tray-backdrop').addEventListener('click', closeToolsTray);
+    document.querySelectorAll('.tool-item').forEach((btn) => {
+      btn.addEventListener('click', () => selectTool(btn.getAttribute('data-tool')));
+    });
     document.getElementById('open-sheet').addEventListener('click', toggleSheet);
     document.getElementById('open-settings').addEventListener('click', openSettingsModal);
     document.getElementById('open-jobs').addEventListener('click', toggleJobsPopover);
@@ -227,6 +252,7 @@
         ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal', 'settings-modal', 'rename-run-modal']
           .forEach((id) => closeModal(id));
         closeSheet();
+        closeToolsTray();
         if (_mode === 'rename' && _renameEditingId != null) cancelRenameEdit();
       }
     });
@@ -252,19 +278,34 @@
   // -------- sport filter strip --------
 
   async function renderSportFilter() {
+    const el = document.getElementById('sport-filter');
+    if (!el) return;
+
+    // The strip is only relevant to the Model Cleanup tool, and only when at
+    // least one sport has actually been synced. Everywhere else: hide it.
+    if (_activeTool !== 'cleanup') {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+
     const cats = await Storage.listCategories();
-    // Sports we know about: cached metadata + any sport id present on a category
-    // record. Build a unified list keyed by id.
+    const syncedCats = cats.filter((c) => c.models);
     const map = new Map();
-    for (const s of _sportsMeta) map.set(String(s.id), { id: String(s.id), name: s.name });
-    for (const c of cats) {
+    for (const c of syncedCats) {
       if (c.sportId && !map.has(String(c.sportId))) {
         map.set(String(c.sportId), { id: String(c.sportId), name: c.sportName || `Sport #${c.sportId}` });
       }
     }
     const sports = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
 
-    const el = document.getElementById('sport-filter');
+    if (!sports.length) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+
+    el.classList.remove('hidden');
     el.innerHTML = '';
     const all = document.createElement('span');
     all.className = 'sport-pill' + (_sportFilter === 'all' ? ' active' : '');
@@ -278,14 +319,6 @@
       p.textContent = s.name;
       p.addEventListener('click', () => setSportFilter(s.id));
       el.appendChild(p);
-    }
-
-    if (!sports.length) {
-      const hint = document.createElement('span');
-      hint.className = 'muted small';
-      hint.style.marginLeft = '8px';
-      hint.textContent = 'Sports appear here once you sync a category.';
-      el.appendChild(hint);
     }
   }
 
@@ -309,6 +342,15 @@
   }
 
   async function renderActive() {
+    if (_activeTool === 'imagery') {
+      await renderImageryTool();
+      return;
+    }
+    if (_activeTool === 'category-imagery') {
+      await renderCategoryImageryTool();
+      return;
+    }
+    // Default: Model Cleanup
     if (_activeCategoryId) {
       const cat = await Storage.loadCategory(_activeCategoryId);
       if (!cat || !cat.models) {
@@ -321,6 +363,303 @@
       return;
     }
     await renderCategoryGrid();
+  }
+
+  // -------- Tools tray --------
+
+  function openToolsTray() {
+    document.getElementById('tools-tray').classList.add('open');
+    document.getElementById('tools-tray-backdrop').classList.remove('hidden');
+    document.querySelectorAll('.tool-item').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-tool') === _activeTool);
+    });
+  }
+  function closeToolsTray() {
+    document.getElementById('tools-tray').classList.remove('open');
+    document.getElementById('tools-tray-backdrop').classList.add('hidden');
+  }
+  async function selectTool(tool) {
+    if (!['cleanup', 'imagery', 'category-imagery'].includes(tool)) return;
+    _activeTool = tool;
+    localStorage.setItem(ACTIVE_TOOL_KEY, tool);
+    closeToolsTray();
+    await renderSportFilter();
+    await renderActive();
+  }
+
+  // -------- Model Imagery tool --------
+
+  async function ensureSportsAndCategoriesLoaded() {
+    // Fetch sports + relatable categories for the imagery dropdowns. Cached
+    // for the lifetime of the page; user can Sync again to refresh.
+    if (_allSports && _allRelatableCategories) return;
+    const [sports, cats] = await Promise.all([
+      Metabase.fetchSports(),
+      Metabase.fetchRelatableCategories(),
+    ]);
+    _allSports = sports;
+    _allRelatableCategories = cats;
+  }
+
+  function rewriteImageUrlForEdge(url) {
+    // production images host blocks unauthenticated browser hotlinking; the
+    // edge.* CDN host is the publicly-readable mirror.
+    if (!url) return null;
+    return String(url).replace(
+      /^https?:\/\/images\.sidelineswap\.com\//,
+      'https://edge.images.sidelineswap.com/'
+    );
+  }
+
+  async function renderImageryTool() {
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <div class="imagery-tool">
+        <h2>Model Imagery</h2>
+        <p class="imagery-subtitle">Find models missing a primary image. Click any row to open the model's images page in admin.</p>
+        <div class="imagery-controls">
+          <label for="img-sport">Sport</label>
+          <select id="img-sport"><option value="">— pick a sport —</option></select>
+          <label for="img-category">Relatable Category</label>
+          <select id="img-category" disabled><option value="">— pick a category —</option></select>
+          <button class="primary" id="img-sync" disabled>Sync</button>
+          <span id="img-status" class="muted small"></span>
+        </div>
+        <div id="img-results"></div>
+      </div>
+    `;
+
+    let loadingError = null;
+    try {
+      await ensureSportsAndCategoriesLoaded();
+    } catch (e) {
+      loadingError = e.message;
+    }
+
+    const sportSel = document.getElementById('img-sport');
+    const catSel = document.getElementById('img-category');
+    const syncBtn = document.getElementById('img-sync');
+    const status = document.getElementById('img-status');
+
+    if (loadingError) {
+      status.textContent = 'Failed to load sports: ' + loadingError;
+      status.style.color = 'var(--red)';
+      return;
+    }
+
+    for (const s of _allSports) {
+      const o = document.createElement('option');
+      o.value = s.id; o.textContent = s.name;
+      sportSel.appendChild(o);
+    }
+
+    const refreshCategoryOptions = (sportId) => {
+      catSel.innerHTML = '<option value="">— pick a category —</option>';
+      if (!sportId) { catSel.disabled = true; syncBtn.disabled = true; return; }
+      const cats = _allRelatableCategories
+        .filter((c) => String(c.sportId) === String(sportId))
+        .sort((a, b) => (a.fullName || a.name).localeCompare(b.fullName || b.name));
+      for (const c of cats) {
+        const o = document.createElement('option');
+        o.value = c.id; o.textContent = c.fullName || c.name;
+        catSel.appendChild(o);
+      }
+      catSel.disabled = false;
+      syncBtn.disabled = true;
+    };
+
+    sportSel.addEventListener('change', () => refreshCategoryOptions(sportSel.value));
+    catSel.addEventListener('change', () => { syncBtn.disabled = !catSel.value; });
+
+    // Restore previous selection.
+    if (_imageryState && _imageryState.sportId) {
+      sportSel.value = _imageryState.sportId;
+      refreshCategoryOptions(_imageryState.sportId);
+      if (_imageryState.categoryId) {
+        catSel.value = _imageryState.categoryId;
+        syncBtn.disabled = false;
+      }
+      renderImageryResults(_imageryState);
+    }
+
+    syncBtn.addEventListener('click', async () => {
+      const sportId = sportSel.value;
+      const categoryId = catSel.value;
+      if (!categoryId) return;
+      syncBtn.disabled = true;
+      status.textContent = 'Syncing…';
+      status.style.color = '';
+      try {
+        const rows = await Metabase.fetchImageryModelsForCategory(categoryId);
+        _imageryState = { sportId, categoryId, rows, syncedAt: new Date().toISOString() };
+        localStorage.setItem(IMAGERY_STATE_KEY, JSON.stringify(_imageryState));
+        status.textContent = `Synced ${rows.length.toLocaleString()} model(s).`;
+        renderImageryResults(_imageryState);
+      } catch (e) {
+        status.textContent = 'Sync failed: ' + e.message;
+        status.style.color = 'var(--red)';
+      } finally {
+        syncBtn.disabled = false;
+      }
+    });
+  }
+
+  function renderImageryResults(state) {
+    const wrap = document.getElementById('img-results');
+    if (!wrap) return;
+    if (!state || !state.rows || !state.rows.length) {
+      wrap.innerHTML = `<p class="muted small">No models synced yet — pick a sport and category, then click Sync.</p>`;
+      return;
+    }
+    const withCount = state.rows.filter((r) => !!r.primary_image_url).length;
+    const withoutCount = state.rows.length - withCount;
+    const rowsHtml = state.rows.map((m) => {
+      const has = !!m.primary_image_url;
+      const adminUrl = `https://admin.sidelineswap.com/admin/models/${m.id}/images${has ? '' : '/new'}`;
+      const bubble = has
+        ? `<span class="img-bubble has-image">Has Image</span>`
+        : `<span class="img-bubble no-image">Missing</span>`;
+      const thumb = has
+        ? `<img src="${escapeAttr(rewriteImageUrlForEdge(m.primary_image_url))}" alt="" style="width:32px;height:32px;object-fit:cover;border-radius:4px;border:1px solid var(--border);" loading="lazy">`
+        : `<span class="muted small">—</span>`;
+      return `
+        <tr class="clickable" data-href="${escapeAttr(adminUrl)}">
+          <td>${thumb}</td>
+          <td>${escapeHtml(m.name || '')} <span class="muted small">#${m.id}</span></td>
+          <td>${bubble}</td>
+          <td class="num">${m.rank_position == null ? '—' : m.rank_position}</td>
+          <td class="num">${(m.last_90_sold_count || 0).toLocaleString()}</td>
+        </tr>
+      `;
+    }).join('');
+    wrap.innerHTML = `
+      <p class="muted small" style="margin-bottom:10px;">
+        ${state.rows.length.toLocaleString()} model(s) · <strong>${withCount.toLocaleString()}</strong> with image · <strong>${withoutCount.toLocaleString()}</strong> missing · synced ${formatRelative(state.syncedAt)}
+      </p>
+      <table class="imagery-table">
+        <thead>
+          <tr><th></th><th>Model</th><th>Model Imagery</th><th>Rank</th><th>L90 Sold</th></tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+    wrap.querySelectorAll('tr.clickable').forEach((tr) => {
+      tr.addEventListener('click', () => window.open(tr.getAttribute('data-href'), '_blank', 'noopener'));
+    });
+  }
+
+  // -------- Relatable Category iOS Imagery tool --------
+
+  async function renderCategoryImageryTool() {
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <div class="imagery-tool">
+        <h2>Relatable Category iOS Imagery</h2>
+        <p class="imagery-subtitle">Find relatable categories under a sport that are missing a mobile (iOS) image. Click any row to open the category's mobile image editor in admin.</p>
+        <div class="imagery-controls">
+          <label for="cimg-sport">Sport (Category 1)</label>
+          <select id="cimg-sport"><option value="">— pick a sport —</option></select>
+          <button class="primary" id="cimg-sync" disabled>Sync</button>
+          <span id="cimg-status" class="muted small"></span>
+        </div>
+        <div id="cimg-results"></div>
+      </div>
+    `;
+
+    let loadingError = null;
+    try {
+      await ensureSportsAndCategoriesLoaded();
+    } catch (e) {
+      loadingError = e.message;
+    }
+
+    const sportSel = document.getElementById('cimg-sport');
+    const syncBtn = document.getElementById('cimg-sync');
+    const status = document.getElementById('cimg-status');
+
+    if (loadingError) {
+      status.textContent = 'Failed to load sports: ' + loadingError;
+      status.style.color = 'var(--red)';
+      return;
+    }
+
+    for (const s of _allSports) {
+      const o = document.createElement('option');
+      o.value = s.id; o.textContent = s.name;
+      sportSel.appendChild(o);
+    }
+
+    sportSel.addEventListener('change', () => { syncBtn.disabled = !sportSel.value; });
+
+    if (_categoryImageryState && _categoryImageryState.sportId) {
+      sportSel.value = _categoryImageryState.sportId;
+      syncBtn.disabled = false;
+      renderCategoryImageryResults(_categoryImageryState);
+    }
+
+    syncBtn.addEventListener('click', async () => {
+      const sportId = sportSel.value;
+      if (!sportId) return;
+      syncBtn.disabled = true;
+      status.textContent = 'Syncing…';
+      status.style.color = '';
+      try {
+        const rows = await Metabase.fetchCategoryImageryForSport(sportId);
+        _categoryImageryState = { sportId, rows, syncedAt: new Date().toISOString() };
+        localStorage.setItem(CATEGORY_IMAGERY_STATE_KEY, JSON.stringify(_categoryImageryState));
+        status.textContent = `Synced ${rows.length.toLocaleString()} categor${rows.length === 1 ? 'y' : 'ies'}.`;
+        renderCategoryImageryResults(_categoryImageryState);
+      } catch (e) {
+        status.textContent = 'Sync failed: ' + e.message;
+        status.style.color = 'var(--red)';
+      } finally {
+        syncBtn.disabled = false;
+      }
+    });
+  }
+
+  function renderCategoryImageryResults(state) {
+    const wrap = document.getElementById('cimg-results');
+    if (!wrap) return;
+    if (!state || !state.rows || !state.rows.length) {
+      wrap.innerHTML = `<p class="muted small">No categories synced yet — pick a sport, then click Sync.</p>`;
+      return;
+    }
+    const withCount = state.rows.filter((r) => !!r.mobile_image_url).length;
+    const withoutCount = state.rows.length - withCount;
+    const rowsHtml = state.rows.map((c) => {
+      const has = !!c.mobile_image_url;
+      // Both states route to the same mobile-image editor page in admin.
+      const adminUrl = `https://admin.sidelineswap.com/admin/categories/${c.id}/mobile_image/edit`;
+      const bubble = has
+        ? `<span class="img-bubble has-image">Has Image</span>`
+        : `<span class="img-bubble no-image">Missing</span>`;
+      const thumb = has
+        ? `<img src="${escapeAttr(rewriteImageUrlForEdge(c.mobile_image_url))}" alt="" style="width:32px;height:32px;object-fit:cover;border-radius:4px;border:1px solid var(--border);" loading="lazy">`
+        : `<span class="muted small">—</span>`;
+      return `
+        <tr class="clickable" data-href="${escapeAttr(adminUrl)}">
+          <td>${thumb}</td>
+          <td>${escapeHtml(c.fullName || c.name || '')} <span class="muted small">#${c.id}</span></td>
+          <td>${bubble}</td>
+          <td class="num">${(c.facet_count || 0).toLocaleString()}</td>
+        </tr>
+      `;
+    }).join('');
+    wrap.innerHTML = `
+      <p class="muted small" style="margin-bottom:10px;">
+        ${state.rows.length.toLocaleString()} categor${state.rows.length === 1 ? 'y' : 'ies'} · <strong>${withCount.toLocaleString()}</strong> with image · <strong>${withoutCount.toLocaleString()}</strong> missing · synced ${formatRelative(state.syncedAt)}
+      </p>
+      <table class="imagery-table">
+        <thead>
+          <tr><th></th><th>Relatable Category</th><th>Mobile Image</th><th>Facet Count</th></tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+    wrap.querySelectorAll('tr.clickable').forEach((tr) => {
+      tr.addEventListener('click', () => window.open(tr.getAttribute('data-href'), '_blank', 'noopener'));
+    });
   }
 
   async function renderCategoryGrid() {
