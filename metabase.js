@@ -263,6 +263,7 @@ SELECT
 FROM rails.categories AS c
 WHERE CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) = __SPORT_ID__
   AND c.sport = 0
+  AND c.state = 'available'
   AND NOT EXISTS (
     SELECT 1 FROM rails.categories AS child
     WHERE child.parent_id = c.id
