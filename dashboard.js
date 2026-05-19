@@ -351,6 +351,10 @@
       await renderCategoryImageryTool();
       return;
     }
+    if (_activeTool === 'landers') {
+      await LandersTool.render();
+      return;
+    }
     // Default: Model Cleanup
     if (_activeCategoryId) {
       const cat = await Storage.loadCategory(_activeCategoryId);
@@ -380,7 +384,7 @@
     document.getElementById('tools-tray-backdrop').classList.add('hidden');
   }
   async function selectTool(tool) {
-    if (!['cleanup', 'imagery', 'category-imagery'].includes(tool)) return;
+    if (!['cleanup', 'imagery', 'category-imagery', 'landers'].includes(tool)) return;
     _activeTool = tool;
     localStorage.setItem(ACTIVE_TOOL_KEY, tool);
     closeToolsTray();
