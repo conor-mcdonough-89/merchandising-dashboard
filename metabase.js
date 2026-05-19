@@ -367,6 +367,7 @@ ORDER BY position
     fetchModelsForCategory,
     fetchImageryModelsForCategory,
     fetchCategoryImageryForSport,
+    runNativeQuery,
     SPORTS_SQL,
     CATEGORIES_SQL,
     MODELS_SQL_TEMPLATE,
