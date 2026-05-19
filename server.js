@@ -199,6 +199,7 @@ const EDGE_ROUTES = [
   { path: '/api/google/sheets-meta',      module: './api/google/sheets-meta.js' },
   { path: '/api/conventions/list',        module: './api/conventions/list.js' },
   { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
+  { path: '/api/landers/chat',            module: './api/landers/chat.js' },
 ];
 
 const _edgeCache = new Map();
