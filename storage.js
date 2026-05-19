@@ -59,7 +59,6 @@
           s.createIndex('slug', 'slug', { unique: false });
           s.createIndex('state', 'state', { unique: false });
           s.createIndex('type', 'type', { unique: false });
-          s.createIndex('models_category_id', 'models_category_id', { unique: false });
         }
         if (!db.objectStoreNames.contains('landers_meta')) {
           db.createObjectStore('landers_meta', { keyPath: 'key' });
@@ -283,10 +282,9 @@
   }
 
   // -------- landers (lander query tool cache) --------
-  // Record shape (light projection — no description/synonyms):
+  // Record shape (light projection — query/display fields only):
   // { id, slug, name, title_tag, query, type, state, discoverable,
-  //   page_view_id, redirect_target_id, canonical_id, models_category_id,
-  //   show_categories, show_categories_no_images }
+  //   available_count, page_view_id, redirect_target_id }
   async function putLanders(rows) {
     if (!rows || !rows.length) return 0;
     const db = await openDB();

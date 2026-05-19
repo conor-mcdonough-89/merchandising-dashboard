@@ -29,12 +29,9 @@ SELECT
   l.type,
   l.state,
   l.discoverable,
+  l.available_count,
   l.page_view_id,
-  l.redirect_target_id,
-  l.canonical_id,
-  l.models_category_id,
-  l.show_categories,
-  l.show_categories_no_images
+  l.redirect_target_id
 FROM rails.landers AS l
 `.trim();
 
@@ -117,12 +114,9 @@ ORDER BY at.block_id, at.position ASC
       type: r.type || '',
       state: r.state || '',
       discoverable: r.discoverable === 1 || r.discoverable === true ? 1 : 0,
+      available_count: r.available_count == null ? 0 : Number(r.available_count),
       page_view_id: r.page_view_id == null ? null : Number(r.page_view_id),
       redirect_target_id: r.redirect_target_id == null ? null : Number(r.redirect_target_id),
-      canonical_id: r.canonical_id == null ? null : Number(r.canonical_id),
-      models_category_id: r.models_category_id == null ? null : Number(r.models_category_id),
-      show_categories: r.show_categories === 1 || r.show_categories === true ? 1 : 0,
-      show_categories_no_images: r.show_categories_no_images === 1 || r.show_categories_no_images === true ? 1 : 0,
     };
   }
 
@@ -183,7 +177,7 @@ ORDER BY at.block_id, at.position ASC
   let _state = {
     filters: { slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all' },
     block: { enabled: false, column: 'layout', op: 'equals', value: '' },
-    sort: { col: 'id', dir: 'desc' },
+    sort: { col: 'available_count', dir: 'desc' },
   };
 
   // Set of lander ids restricted by the last-applied block-composition filter.
@@ -422,7 +416,7 @@ ORDER BY at.block_id, at.position ASC
     return out;
   }
 
-  const SORTABLE_COLS = ['id', 'slug', 'name', 'query', 'type', 'state'];
+  const SORTABLE_COLS = ['id', 'slug', 'name', 'query', 'type', 'state', 'available_count'];
 
   function renderResults() {
     const wrap = document.getElementById('landers-results');
@@ -446,11 +440,14 @@ ORDER BY at.block_id, at.position ASC
             ${th('id', 'ID')}
             ${th('slug', 'Slug')}
             ${th('name', 'Name')}
+            <th>Title Tag</th>
             ${th('query', 'Query')}
             ${th('type', 'Type')}
             ${th('state', 'State')}
             <th>Disc.</th>
+            ${th('available_count', 'Avail.')}
             <th>PV</th>
+            <th>Redirect</th>
             <th>Admin</th>
           </tr>
         </thead>
@@ -468,7 +465,7 @@ ORDER BY at.block_id, at.position ASC
           _state.sort.dir = _state.sort.dir === 'asc' ? 'desc' : 'asc';
         } else {
           _state.sort.col = col;
-          _state.sort.dir = (col === 'id') ? 'desc' : 'asc';
+          _state.sort.dir = (col === 'id' || col === 'available_count') ? 'desc' : 'asc';
         }
         persistAndRender();
       });
@@ -485,6 +482,7 @@ ORDER BY at.block_id, at.position ASC
   function rowHtml(l) {
     const lUrl = adminUrl('lander', l.id);
     const pvUrl = adminUrl('page_view', l.page_view_id);
+    const rdUrl = adminUrl('lander', l.redirect_target_id);
     const stateTag = l.state ? `<span class="state-tag state-${escapeAttr(l.state)}">${escapeHtml(l.state)}</span>` : '';
     const discIcon = l.discoverable ? '✓' : '—';
     return `
@@ -492,11 +490,14 @@ ORDER BY at.block_id, at.position ASC
         <td class="num">${l.id}</td>
         <td><code>${escapeHtml(l.slug)}</code></td>
         <td>${escapeHtml(l.name)}</td>
+        <td class="muted small">${escapeHtml(l.title_tag)}</td>
         <td>${escapeHtml(l.query)}</td>
         <td>${escapeHtml(l.type)}</td>
         <td>${stateTag}</td>
         <td>${discIcon}</td>
+        <td class="num">${(l.available_count || 0).toLocaleString()}</td>
         <td>${l.page_view_id ? `<a href="${escapeAttr(pvUrl)}" target="_blank" rel="noopener">${l.page_view_id}</a>` : '—'}</td>
+        <td>${l.redirect_target_id ? `<a href="${escapeAttr(rdUrl)}" target="_blank" rel="noopener">${l.redirect_target_id}</a>` : '—'}</td>
         <td><a href="${escapeAttr(lUrl)}" target="_blank" rel="noopener">Open ↗</a></td>
       </tr>
     `;
