@@ -1,13 +1,15 @@
 // storage.js — IndexedDB persistence for the merch dashboard.
 // Database name: `merch-dashboard`
-// Stores: categories, conventions, decisions, sheet
+// Stores: categories, conventions, decisions, sheet, landers, landers_meta
 // Public API: openDB, saveCategory, loadCategory, listCategories,
 //             deleteCategory,
 //             saveConvention, loadConvention, listConventions,
 //             saveCategoryConvention, loadCategoryConvention,
 //             listConventionsForCategory,
 //             recordDecision, getRejections, clearExpiredDecisions,
-//             addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet
+//             addSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
+//             putLanders, listLanders, clearLanders,
+//             saveLandersMeta, loadLandersMeta
 //
 // The `conventions` store holds two scopes of record, distinguished by key
 // shape: brand conventions are keyed `${brandId}::${categoryId}`, category
@@ -16,7 +18,7 @@
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
   const REJECTION_TTL_DAYS = 30;
 
   let _dbPromise = null;
@@ -49,6 +51,17 @@
         }
         if (!db.objectStoreNames.contains('sheet')) {
           db.createObjectStore('sheet', { keyPath: 'sourceId' });
+        }
+        // v2 -> v3: landers query tool. Light-projection cache of ~180k landers
+        // for client-side filter/sort, plus a singleton meta record for syncedAt.
+        if (!db.objectStoreNames.contains('landers')) {
+          const s = db.createObjectStore('landers', { keyPath: 'id' });
+          s.createIndex('slug', 'slug', { unique: false });
+          s.createIndex('state', 'state', { unique: false });
+          s.createIndex('type', 'type', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('landers_meta')) {
+          db.createObjectStore('landers_meta', { keyPath: 'key' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -268,6 +281,39 @@
     return promisify(store.clear());
   }
 
+  // -------- landers (lander query tool cache) --------
+  // Record shape (light projection — query/display fields only):
+  // { id, slug, name, title_tag, query, type, state, discoverable,
+  //   available_count, page_view_id, redirect_target_id }
+  async function putLanders(rows) {
+    if (!rows || !rows.length) return 0;
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction('landers', 'readwrite');
+      const store = t.objectStore('landers');
+      for (const r of rows) store.put(r);
+      t.oncomplete = () => resolve(rows.length);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
+  }
+  async function listLanders() {
+    const store = await tx('landers', 'readonly');
+    return promisify(store.getAll());
+  }
+  async function clearLanders() {
+    const store = await tx('landers', 'readwrite');
+    return promisify(store.clear());
+  }
+  async function saveLandersMeta(meta) {
+    const store = await tx('landers_meta', 'readwrite');
+    return promisify(store.put({ key: 'singleton', ...meta }));
+  }
+  async function loadLandersMeta() {
+    const store = await tx('landers_meta', 'readonly');
+    return promisify(store.get('singleton'));
+  }
+
   global.Storage = {
     openDB,
     saveCategory, loadCategory, listCategories, deleteCategory,
@@ -276,5 +322,6 @@
     listConventionsForCategory,
     recordDecision, getRejections, clearExpiredDecisions, clearRejectionsForSourceIds,
     addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
+    putLanders, listLanders, clearLanders, saveLandersMeta, loadLandersMeta,
   };
 })(window);
