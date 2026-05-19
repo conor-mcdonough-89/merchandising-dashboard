@@ -13,13 +13,16 @@
 (function (global) {
   const ADMIN_BASE = 'https://admin.sidelineswap.com/admin';
   const STATE_KEY = 'merch-landers-ui-state';
+  const SYNC_STATES_KEY = 'merch-landers-sync-states';
+  const ALL_LANDER_STATES = ['available', 'redirected', 'removed', 'draft'];
+  const DEFAULT_SYNC_STATES = ['available'];
 
   // ---- SQL ----
 
   // Light projection: omit description + synonyms (heavy fields) so the
   // ~180k row sync stays IndexedDB-friendly. Detail drawer pulls those on
   // demand if needed.
-  const LANDERS_LIST_SQL = `
+  const LANDERS_LIST_SQL_TEMPLATE = `
 SELECT
   l.id,
   l.slug,
@@ -33,7 +36,14 @@ SELECT
   l.page_view_id,
   l.redirect_target_id
 FROM rails.landers AS l
+WHERE __STATE_FILTER__
 `.trim();
+
+  function buildStateFilter(states) {
+    const safe = (states || []).filter((s) => ALL_LANDER_STATES.includes(s));
+    if (!safe.length) throw new Error('Select at least one state to sync.');
+    return `l.state IN (${safe.map((s) => `'${s}'`).join(', ')})`;
+  }
 
   // Predicate is substituted server-side from a whitelisted column + operator
   // (see buildBlockPredicate). r.web = 1 because the user said the "web"
@@ -120,9 +130,10 @@ ORDER BY at.block_id, at.position ASC
     };
   }
 
-  async function syncAllLanders(onProgress) {
+  async function syncAllLanders(states, onProgress) {
+    const sql = LANDERS_LIST_SQL_TEMPLATE.replace('__STATE_FILTER__', buildStateFilter(states));
     if (onProgress) onProgress('Querying Metabase…');
-    const rows = await Metabase.runNativeQuery(LANDERS_LIST_SQL);
+    const rows = await Metabase.runNativeQuery(sql);
     if (onProgress) onProgress(`Saving ${rows.length.toLocaleString()} landers to IndexedDB…`);
     await Storage.clearLanders();
     // Chunked writes keep individual transactions small.
@@ -132,8 +143,21 @@ ORDER BY at.block_id, at.position ASC
       await Storage.putLanders(slice);
       if (onProgress) onProgress(`Saved ${Math.min(i + CHUNK, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}…`);
     }
-    await Storage.saveLandersMeta({ syncedAt: new Date().toISOString(), count: rows.length });
+    await Storage.saveLandersMeta({ syncedAt: new Date().toISOString(), count: rows.length, states });
     return rows.length;
+  }
+
+  function loadSyncStates() {
+    try {
+      const raw = localStorage.getItem(SYNC_STATES_KEY);
+      if (!raw) return DEFAULT_SYNC_STATES.slice();
+      const arr = JSON.parse(raw);
+      const safe = Array.isArray(arr) ? arr.filter((s) => ALL_LANDER_STATES.includes(s)) : [];
+      return safe.length ? safe : DEFAULT_SYNC_STATES.slice();
+    } catch (_) { return DEFAULT_SYNC_STATES.slice(); }
+  }
+  function saveSyncStates(states) {
+    localStorage.setItem(SYNC_STATES_KEY, JSON.stringify(states || []));
   }
 
   async function fetchLanderIdsWithBlock(filter) {
@@ -244,8 +268,17 @@ ORDER BY at.block_id, at.position ASC
 
         <div class="landers-sync-bar">
           <button class="primary" id="landers-sync-btn">${_allLanders.length ? 'Re-sync landers' : 'Sync landers from Metabase'}</button>
+          <span class="muted small" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <span>Include states:</span>
+            ${ALL_LANDER_STATES.map((s) => `
+              <label class="row-flex" style="gap:4px;cursor:pointer;">
+                <input type="checkbox" class="lf-sync-state" value="${s}"${loadSyncStates().includes(s) ? ' checked' : ''}>
+                <span>${s}</span>
+              </label>
+            `).join('')}
+          </span>
           <span class="muted small" id="landers-sync-status">
-            ${meta ? `${_allLanders.length.toLocaleString()} landers · synced ${formatRelative(meta.syncedAt)}` : 'No landers synced yet.'}
+            ${meta ? `${_allLanders.length.toLocaleString()} landers (${(meta.states || ['?']).join(', ')}) · synced ${formatRelative(meta.syncedAt)}` : 'No landers synced yet.'}
           </span>
         </div>
 
@@ -256,6 +289,13 @@ ORDER BY at.block_id, at.position ASC
     `;
 
     document.getElementById('landers-sync-btn').addEventListener('click', onSyncClick);
+    document.querySelectorAll('.lf-sync-state').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const checked = Array.from(document.querySelectorAll('.lf-sync-state'))
+          .filter((c) => c.checked).map((c) => c.value);
+        saveSyncStates(checked);
+      });
+    });
     if (_allLanders.length) {
       bindFilterHandlers();
       renderResults();
@@ -276,9 +316,7 @@ ORDER BY at.block_id, at.position ASC
           </select>
           <select id="lf-state">
             <option value="all"${f.state === 'all' ? ' selected' : ''}>All states</option>
-            <option value="available"${f.state === 'available' ? ' selected' : ''}>available</option>
-            <option value="redirected"${f.state === 'redirected' ? ' selected' : ''}>redirected</option>
-            <option value="removed"${f.state === 'removed' ? ' selected' : ''}>removed</option>
+            ${ALL_LANDER_STATES.map((s) => `<option value="${s}"${f.state === s ? ' selected' : ''}>${s}</option>`).join('')}
           </select>
           <select id="lf-discoverable">
             <option value="all"${f.discoverable === 'all' ? ' selected' : ''}>Discoverable: any</option>
@@ -585,9 +623,18 @@ ORDER BY at.block_id, at.position ASC
       btn.disabled = false;
       return;
     }
+    const states = Array.from(document.querySelectorAll('.lf-sync-state'))
+      .filter((c) => c.checked).map((c) => c.value);
+    if (!states.length) {
+      status.textContent = 'Select at least one state to include.';
+      status.style.color = 'var(--red)';
+      btn.disabled = false;
+      return;
+    }
+    saveSyncStates(states);
     try {
-      const count = await syncAllLanders((msg) => { status.textContent = msg; });
-      status.textContent = `${count.toLocaleString()} landers · synced just now.`;
+      const count = await syncAllLanders(states, (msg) => { status.textContent = msg; });
+      status.textContent = `${count.toLocaleString()} landers (${states.join(', ')}) · synced just now.`;
       _allLanders = await Storage.listLanders();
       // Re-render to show filters + table.
       render();
