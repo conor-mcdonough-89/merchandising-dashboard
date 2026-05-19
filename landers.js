@@ -47,7 +47,8 @@ WHERE __STATE_FILTER__
 
   // Predicate is substituted server-side from a whitelisted column + operator
   // (see buildBlockPredicate). r.web = 1 because the user said the "web"
-  // connections are the ones that matter.
+  // connections are the ones that matter. __TILE_COUNT_CLAUSE__ is either an
+  // empty string or `AND b.id IN (...)` restricting to blocks with N tiles.
   const LANDER_IDS_WITH_BLOCK_SQL_TEMPLATE = `
 SELECT DISTINCT l.id
 FROM rails.landers AS l
@@ -55,6 +56,16 @@ JOIN rails.page_view_block_relations AS r ON r.page_view_id = l.page_view_id
 JOIN rails.page_view_blocks AS b ON b.id = r.block_id
 WHERE r.web = 1
   AND __BLOCK_PREDICATE__
+  __TILE_COUNT_CLAUSE__
+`.trim();
+
+  // Distinct lander ids that have at least one web-attached block, regardless
+  // of block content. Used by the has_block toggle.
+  const LANDER_IDS_WITH_ANY_BLOCK_SQL = `
+SELECT DISTINCT l.id
+FROM rails.landers AS l
+JOIN rails.page_view_block_relations AS r ON r.page_view_id = l.page_view_id
+WHERE r.web = 1
 `.trim();
 
   // One lander's full tree. Returns the blocks row-per-block (no tile fan-out)
@@ -100,6 +111,7 @@ ORDER BY at.block_id, at.position ASC
 
   const BLOCK_PREDICATE_COLUMNS = new Set(['layout', 'data_type', 'name', 'title', 'destination']);
   const BLOCK_PREDICATE_OPS = new Set(['equals', 'contains']);
+  const NUM_OPS = new Set(['>', '<', '>=', '<=', '=', 'between']);
 
   // Builds the WHERE fragment for the block-composition filter. Column +
   // operator come from a whitelist; the user-supplied value is escaped for
@@ -112,6 +124,59 @@ ORDER BY at.block_id, at.position ASC
     if (!v) throw new Error('Block filter value cannot be empty.');
     if (op === 'equals') return `b.${column} = '${v}'`;
     return `LOWER(b.${column}) LIKE LOWER('%${v}%')`;
+  }
+
+  // Builds the `AND b.id IN (...)` clause restricting to blocks whose
+  // attachable_tiles count satisfies the predicate. Returns '' when tile_count
+  // is null. Op and value are whitelisted/parsed before interpolation.
+  function buildTileCountClause(pred) {
+    if (!pred || !pred.op) return '';
+    if (!NUM_OPS.has(pred.op)) throw new Error('Invalid tile_count op: ' + pred.op);
+    let having;
+    if (pred.op === 'between') {
+      if (!Array.isArray(pred.value) || pred.value.length !== 2) throw new Error('tile_count between requires [lo, hi]');
+      const lo = parseInt(pred.value[0], 10);
+      const hi = parseInt(pred.value[1], 10);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) throw new Error('tile_count between requires integers');
+      having = `COUNT(*) BETWEEN ${lo} AND ${hi}`;
+    } else {
+      const n = parseInt(pred.value, 10);
+      if (!Number.isFinite(n)) throw new Error('tile_count value must be a number');
+      having = `COUNT(*) ${pred.op} ${n}`;
+    }
+    return `AND b.id IN (
+  SELECT at.block_id FROM rails.attachable_tiles AS at
+  GROUP BY at.block_id
+  HAVING ${having}
+)`;
+  }
+
+  // Client-side numeric predicate against a lander row's available_count.
+  function numericMatches(pred, n) {
+    if (!pred) return true;
+    if (pred.op === 'between') {
+      if (!Array.isArray(pred.value)) return true;
+      const [lo, hi] = pred.value.map(Number);
+      return n >= lo && n <= hi;
+    }
+    const v = Number(pred.value);
+    if (!Number.isFinite(v)) return true;
+    switch (pred.op) {
+      case '>': return n > v;
+      case '<': return n < v;
+      case '>=': return n >= v;
+      case '<=': return n <= v;
+      case '=': return n === v;
+      default: return true;
+    }
+  }
+
+  function summarizeNumPred(pred, label) {
+    if (!pred) return null;
+    if (pred.op === 'between' && Array.isArray(pred.value)) {
+      return `${label} between ${pred.value[0]}–${pred.value[1]}`;
+    }
+    return `${label} ${pred.op} ${pred.value}`;
   }
 
   function normalizeLander(r) {
@@ -162,8 +227,18 @@ ORDER BY at.block_id, at.position ASC
 
   async function fetchLanderIdsWithBlock(filter) {
     const predicate = buildBlockPredicate(filter);
-    const sql = LANDER_IDS_WITH_BLOCK_SQL_TEMPLATE.replace('__BLOCK_PREDICATE__', predicate);
+    const tileClause = buildTileCountClause(filter.tile_count);
+    const sql = LANDER_IDS_WITH_BLOCK_SQL_TEMPLATE
+      .replace('__BLOCK_PREDICATE__', predicate)
+      .replace('__TILE_COUNT_CLAUSE__', tileClause);
     const rows = await Metabase.runNativeQuery(sql);
+    const set = new Set();
+    for (const r of rows) set.add(Number(r.id));
+    return set;
+  }
+
+  async function fetchLanderIdsWithAnyBlock() {
+    const rows = await Metabase.runNativeQuery(LANDER_IDS_WITH_ANY_BLOCK_SQL);
     const set = new Set();
     for (const r of rows) set.add(Number(r.id));
     return set;
@@ -199,15 +274,22 @@ ORDER BY at.block_id, at.position ASC
   }
 
   let _state = {
-    filters: { slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all' },
-    block: { enabled: false, column: 'layout', op: 'equals', value: '' },
+    filters: {
+      slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
+      available_count: null, // { op, value } or null
+      has_page_view: 'any',  // 'any' | 'has' | 'none'
+    },
+    block: { enabled: false, column: 'layout', op: 'equals', value: '', tile_count: null },
+    has_block: 'any', // 'any' | 'has' | 'none'
     sort: { col: 'available_count', dir: 'desc' },
   };
 
-  // Set of lander ids restricted by the last-applied block-composition filter.
-  // `null` = filter disabled (no restriction). Lives outside _state because it
-  // is server-derived and not worth persisting across reloads.
+  // Sets of lander ids restricted by server-side queries. `null` means no
+  // constraint applied yet — these live outside _state because they're
+  // server-derived and not worth persisting.
   let _blockIdSet = null;
+  let _hasBlockIdSet = null;
+  let _lastChatSpec = null;
   let _allLanders = null;
 
   function adminUrl(entity, id) {
@@ -282,6 +364,7 @@ ORDER BY at.block_id, at.position ASC
           </span>
         </div>
 
+        ${_allLanders.length ? renderChatHtml() : ''}
         ${_allLanders.length ? renderFiltersHtml() : ''}
         <div id="landers-results"></div>
         <div id="lander-detail" class="lander-detail hidden"></div>
@@ -297,9 +380,23 @@ ORDER BY at.block_id, at.position ASC
       });
     });
     if (_allLanders.length) {
+      bindChatHandlers();
       bindFilterHandlers();
       renderResults();
     }
+  }
+
+  function renderChatHtml() {
+    return `
+      <div class="landers-chat">
+        <div class="landers-chat-row">
+          <input type="text" id="lf-chat-input" placeholder="Ask in plain English — e.g. &quot;available landers with a top-models block and 'model' in the query&quot;">
+          <button class="primary" id="lf-chat-ask">Ask</button>
+          <span id="lf-chat-status" class="muted small"></span>
+        </div>
+        <div id="lf-chat-pill" class="landers-chat-pill hidden"></div>
+      </div>
+    `;
   }
 
   function renderFiltersHtml() {
@@ -394,12 +491,184 @@ ORDER BY at.block_id, at.position ASC
     document.getElementById('lf-block-apply').addEventListener('click', applyBlockFilter);
 
     document.getElementById('lf-clear').addEventListener('click', () => {
-      _state.filters = { slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all' };
-      _state.block = { enabled: false, column: 'layout', op: 'equals', value: '' };
+      _state.filters = {
+        slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
+        available_count: null, has_page_view: 'any',
+      };
+      _state.block = { enabled: false, column: 'layout', op: 'equals', value: '', tile_count: null };
+      _state.has_block = 'any';
       _blockIdSet = null;
+      _hasBlockIdSet = null;
+      _lastChatSpec = null;
       saveState(_state);
       render();
     });
+  }
+
+  // ---- Chat translation ----
+
+  async function postChat(message) {
+    const known_states = Array.from(new Set(_allLanders.map((l) => l.state).filter(Boolean)));
+    const known_types = Array.from(new Set(_allLanders.map((l) => l.type).filter(Boolean))).slice(0, 30);
+    const res = await fetch('/api/landers/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message, known_states, known_types }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function bindChatHandlers() {
+    const input = document.getElementById('lf-chat-input');
+    const btn = document.getElementById('lf-chat-ask');
+    if (!input || !btn) return;
+    btn.addEventListener('click', () => askChat());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); askChat(); }
+    });
+  }
+
+  async function askChat() {
+    const input = document.getElementById('lf-chat-input');
+    const status = document.getElementById('lf-chat-status');
+    const btn = document.getElementById('lf-chat-ask');
+    const msg = (input.value || '').trim();
+    if (!msg) { input.focus(); return; }
+    status.textContent = 'Translating…';
+    status.style.color = '';
+    btn.disabled = true;
+    try {
+      const spec = await postChat(msg);
+      _lastChatSpec = spec;
+      renderChatPill(spec);
+      await applyChatSpec(spec);
+      status.textContent = '';
+    } catch (e) {
+      status.textContent = 'Failed: ' + e.message;
+      status.style.color = 'var(--red)';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderChatPill(spec) {
+    const pill = document.getElementById('lf-chat-pill');
+    if (!pill) return;
+    if (!spec) { pill.classList.add('hidden'); pill.innerHTML = ''; return; }
+    const summary = summarizeSpec(spec);
+    pill.classList.remove('hidden');
+    pill.innerHTML = `
+      <div class="landers-chat-pill-body">
+        <strong>Applied:</strong> ${escapeHtml(spec.explanation || '(no explanation)')}
+        ${summary ? `<div class="muted small">${escapeHtml(summary)}</div>` : ''}
+      </div>
+      <button class="ghost" id="lf-chat-clear">Clear</button>
+    `;
+    const clearBtn = document.getElementById('lf-chat-clear');
+    if (clearBtn) clearBtn.addEventListener('click', () => {
+      _lastChatSpec = null;
+      document.getElementById('lf-clear').click();
+    });
+  }
+
+  function summarizeSpec(spec) {
+    const parts = [];
+    const f = spec.filters || {};
+    if (f.slug_contains) parts.push(`slug contains "${f.slug_contains}"`);
+    if (f.query_contains) parts.push(`query contains "${f.query_contains}"`);
+    if (f.name_contains) parts.push(`name contains "${f.name_contains}"`);
+    if (f.type) parts.push(`type=${f.type}`);
+    if (f.state) parts.push(`state=${f.state}`);
+    if (f.discoverable === true) parts.push('discoverable');
+    if (f.discoverable === false) parts.push('undiscoverable');
+    const ac = summarizeNumPred(f.available_count, 'available_count');
+    if (ac) parts.push(ac);
+    if (f.has_page_view === 'has') parts.push('has page_view');
+    if (f.has_page_view === 'none') parts.push('no page_view');
+    const b = spec.block || {};
+    if (b.enabled) {
+      parts.push(`block.${b.column} ${b.op} "${b.value}"`);
+      const tc = summarizeNumPred(b.tile_count, 'tile_count');
+      if (tc) parts.push(tc);
+    }
+    if (spec.has_block === 'has') parts.push('has any block');
+    if (spec.has_block === 'none') parts.push('no blocks');
+    return parts.join(' · ');
+  }
+
+  // Translates the LLM filter spec back onto the filter UI and fires any
+  // server-side queries the spec implies (block filter, has-block).
+  async function applyChatSpec(spec) {
+    const f = spec.filters || {};
+    _state.filters.slug = f.slug_contains || '';
+    _state.filters.query = f.query_contains || '';
+    _state.filters.name = f.name_contains || '';
+    _state.filters.type = f.type || 'all';
+    _state.filters.state = f.state || 'all';
+    if (f.discoverable === true) _state.filters.discoverable = '1';
+    else if (f.discoverable === false) _state.filters.discoverable = '0';
+    else _state.filters.discoverable = 'all';
+    _state.filters.available_count = f.available_count || null;
+    _state.filters.has_page_view = f.has_page_view || 'any';
+
+    const b = spec.block || {};
+    _state.block.enabled = !!b.enabled;
+    if (b.enabled) {
+      _state.block.column = b.column;
+      _state.block.op = b.op;
+      _state.block.value = b.value;
+      _state.block.tile_count = b.tile_count || null;
+    } else {
+      _state.block.tile_count = null;
+      _blockIdSet = null;
+    }
+    _state.has_block = spec.has_block || 'any';
+    saveState(_state);
+
+    // Re-render the filter inputs so the new state is visible. Then re-bind.
+    refreshFilterInputs();
+
+    // Fire server-side queries.
+    if (_state.block.enabled) {
+      try {
+        document.getElementById('lf-block-status').textContent = 'Running…';
+        _blockIdSet = await fetchLanderIdsWithBlock(_state.block);
+        document.getElementById('lf-block-status').textContent = `${_blockIdSet.size.toLocaleString()} matching landers.`;
+      } catch (e) {
+        _blockIdSet = null;
+        document.getElementById('lf-block-status').textContent = 'Block filter failed: ' + e.message;
+        document.getElementById('lf-block-status').style.color = 'var(--red)';
+      }
+    }
+    if (_state.has_block === 'has' || _state.has_block === 'none') {
+      if (!_hasBlockIdSet) {
+        try {
+          _hasBlockIdSet = await fetchLanderIdsWithAnyBlock();
+        } catch (e) {
+          _hasBlockIdSet = null;
+        }
+      }
+    }
+    renderResults();
+  }
+
+  // Re-syncs the filter <input>/<select> elements with the current _state
+  // values. Used after applyChatSpec mutates state outside the manual UI path.
+  function refreshFilterInputs() {
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    set('lf-slug', _state.filters.slug);
+    set('lf-query', _state.filters.query);
+    set('lf-name', _state.filters.name);
+    set('lf-type', _state.filters.type);
+    set('lf-state', _state.filters.state);
+    set('lf-discoverable', _state.filters.discoverable);
+    const be = document.getElementById('lf-block-enabled');
+    if (be) be.checked = _state.block.enabled;
+    set('lf-block-col', _state.block.column);
+    set('lf-block-op', _state.block.op);
+    set('lf-block-val', _state.block.value);
   }
 
   function persistAndRender() {
@@ -441,7 +710,12 @@ ORDER BY at.block_id, at.position ASC
       if (f.type !== 'all' && l.type !== f.type) continue;
       if (f.state !== 'all' && l.state !== f.state) continue;
       if (f.discoverable !== 'all' && String(l.discoverable) !== f.discoverable) continue;
+      if (!numericMatches(f.available_count, Number(l.available_count || 0))) continue;
+      if (f.has_page_view === 'has' && l.page_view_id == null) continue;
+      if (f.has_page_view === 'none' && l.page_view_id != null) continue;
       if (_state.block.enabled && _blockIdSet && !_blockIdSet.has(Number(l.id))) continue;
+      if (_state.has_block === 'has' && _hasBlockIdSet && !_hasBlockIdSet.has(Number(l.id))) continue;
+      if (_state.has_block === 'none' && _hasBlockIdSet && _hasBlockIdSet.has(Number(l.id))) continue;
       out.push(l);
     }
     const { col, dir } = _state.sort;

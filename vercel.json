@@ -16,6 +16,7 @@
     { "source": "/api/google/sheets-read", "destination": "/api/google/sheets-read" },
     { "source": "/api/google/sheets-meta", "destination": "/api/google/sheets-meta" },
     { "source": "/api/conventions/list", "destination": "/api/conventions/list" },
-    { "source": "/api/conventions/upsert", "destination": "/api/conventions/upsert" }
+    { "source": "/api/conventions/upsert", "destination": "/api/conventions/upsert" },
+    { "source": "/api/landers/chat", "destination": "/api/landers/chat" }
   ]
 }
