@@ -10,7 +10,7 @@ export const config = { runtime: 'edge' };
 const BLOCK_COLUMNS = ['layout', 'data_type', 'name', 'title', 'destination'];
 const STRING_OPS = ['equals', 'contains'];
 const NUM_OPS = ['>', '<', '>=', '<=', '=', 'between'];
-const LANDER_STATES = ['available', 'redirected', 'removed', 'draft'];
+const LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
 const TRISTATE = ['has', 'none', 'any'];
 
 const SYSTEM_PROMPT = `You are a query translator for SidelineSwap's landing-page (lander) tool. Operators describe what they're looking for in natural language; you translate that into a structured JSON filter spec.
@@ -33,7 +33,7 @@ Return JSON only matching this exact shape (use null for any unset field):
     "query_contains": <string|null>,
     "name_contains": <string|null>,
     "type": <string|null>,
-    "state": <"available"|"redirected"|"removed"|"draft"|null>,
+    "state": <"available"|"redirect"|"removed"|"draft"|null>,
     "discoverable": <true|false|null>,
     "available_count": { "op": ">|<|>=|<=|=|between", "value": <number or [lo,hi]> } | null,
     "has_page_view": "has" | "none" | null
@@ -76,7 +76,7 @@ Lander type mappings:
 State mappings:
 - "live", "published", "active page", "available" → state = "available".
 - "draft", "unpublished", "not live" → state = "draft".
-- "redirect", "301", "forwarded" → state = "redirected" (note: emit "redirected", not "redirect").
+- "redirect", "301", "forwarded" → state = "redirect".
 - "removed", "deleted", "taken down" → state = "removed".
 
 Discoverability:
@@ -106,7 +106,7 @@ Examples:
 - "Find me golf landers with popular model carousels" → filters.slug_contains="golf", block.enabled=true, block.column="layout", block.op="equals", block.value="top-models".
 - "Live hockey-stick category pages with a featured-categories header" → filters.slug_contains="hockey-sticks", filters.state="available", block.column="layout", block.op="equals", block.value="lander-featured-categories".
 - "Draft supermodel pages with no blocks" → filters.type="model", filters.state="draft", has_block="none".
-- "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirected".`;
+- "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".`;
 
 function clamp(value, allowed) {
   return allowed.includes(value) ? value : null;

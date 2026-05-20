@@ -14,7 +14,7 @@
   const ADMIN_BASE = 'https://admin.sidelineswap.com/admin';
   const STATE_KEY = 'merch-landers-ui-state';
   const SYNC_STATES_KEY = 'merch-landers-sync-states';
-  const ALL_LANDER_STATES = ['available', 'redirected', 'removed', 'draft'];
+  const ALL_LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
   const DEFAULT_SYNC_STATES = ['available'];
 
   // ---- SQL ----
