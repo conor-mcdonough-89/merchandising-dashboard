@@ -50,22 +50,22 @@ Return JSON only matching this exact shape (use null for any unset field):
 }
 
 Rules:
-- Map block keywords to columns intelligently. "top-models block" → block.column="layout", block.op="equals", block.value="top_models". "buying-guide block" → block.column="data_type", block.op="contains", block.value="buying_guide". "block named X" → column="name", op="contains".
+- Map block keywords to columns intelligently. "top-models block" → block.column="layout", block.op="equals", block.value="top-models". "buying-guide block" → block.column="layout", block.op="equals", block.value="buying-guide". "block named X" → column="name", op="contains".
 - "with more than one tile" → block.tile_count = { op: ">", value: 1 }.
-- "model" in the query field means query_contains="model".
+- Lander archetypes are encoded in the **query** field, not the type field or a dedicated column. "brand lander" → query_contains="brand". "model lander" → query_contains="model". "category lander" → query_contains="category". When the operator combines an archetype with a sport ("lacrosse brand landers"), set BOTH slug_contains="<sport>" AND query_contains="<archetype>".
 - If the request can't be expressed in this schema, return all-null filters and put a short note in explanation. Never invent SQL. Never return any other JSON shape.
 
 Natural-language vocabulary (operators speak in shorthand — translate it):
 
 Sport landers. "Golf landers", "baseball landers", "hockey landers" etc. are NOT a separate type — they mean landers whose slug contains the sport name. Map "<sport> landers" → slug_contains: "<sport>".
 
-Lander archetypes (colloquial — all map to slug_contains and/or type, NOT to a dedicated archetype field):
-- "parent category lander" → a sport-level slug like "hockey", "golf" (slug_contains the sport, no hyphens implied).
-- "child category lander" → a sport + sub-category slug like "hockey-sticks". Use slug_contains with the relevant token.
-- "relatable category lander" / "terminal category" → a leaf-category slug like "baseball-gloves".
-- "category detail lander" → slug combining a category with an attribute (e.g. "flex-85-hockey-sticks", "left-handed-baseball-gloves").
-- "brand category lander" / "brand detail lander" → slug combining a brand and category (e.g. "easton-baseball-bats", "bauer-hockey-sticks"). Use slug_contains with brand or "<brand>-<category>".
-- "model lander" / "supermodel page" / "best of" / "top models page" → type = "model" (the schema type, distinct from a brand category lander).
+Lander archetypes. The archetype is encoded in the lander's **query** field (e.g. a brand lander is a lander whose query is literally "brand"). Map the archetype word to query_contains, NOT to type and NOT to a dedicated archetype column:
+- "brand lander" → query_contains="brand".
+- "model lander" / "supermodel page" / "best of" / "top models page" → query_contains="model". (The schema type="model" exists too, but archetype questions should filter on the query field unless the operator explicitly says "model-type landers".)
+- "category lander" / "parent category lander" / "child category lander" / "relatable category lander" / "terminal category" → query_contains="category".
+- "category detail lander" → query_contains="category_detail".
+- "brand category lander" / "brand detail lander" → query_contains="brand_category".
+When the operator combines a sport with an archetype ("lacrosse brand landers", "golf model landers"), set BOTH slug_contains="<sport>" AND query_contains="<archetype>". Do not drop one for the other.
 
 Lander type mappings:
 - "general lander", "standard page", "results page" → type = "general".
@@ -87,6 +87,7 @@ Block layout vocabulary (block.column = "layout", block.op = "equals", block.val
 - "top models", "popular models", "models carousel", "popular model carousel" → "top-models".
 - "results", "listings grid", "search results grid" → "results".
 - "FAQ", "model review", "Butter content", "CMS content", "collapsible content" → "collapsable-content-butter".
+- "buying guide", "buying guide block", "buyers guide" → "buying-guide".
 - "blog", "articles", "editorial", "blog carousel", "blog post grid" → "blog-post-grid-3".
 - "trending", "horizontal scroll", "item carousel", "trending listings" → "item-grid-horizontal-scroll".
 - "featured categories", "category header", "merchandised categories" → "lander-featured-categories".
@@ -104,8 +105,10 @@ Tiles:
 
 Examples:
 - "Find me golf landers with popular model carousels" → filters.slug_contains="golf", block.enabled=true, block.column="layout", block.op="equals", block.value="top-models".
+- "Find me lacrosse brand landers with popular models carousels" → filters.slug_contains="lacrosse", filters.query_contains="brand", block.enabled=true, block.column="layout", block.op="equals", block.value="top-models".
+- "Find me available golf landers with buying guide blocks" → filters.slug_contains="golf", filters.state="available", block.enabled=true, block.column="layout", block.op="equals", block.value="buying-guide".
 - "Live hockey-stick category pages with a featured-categories header" → filters.slug_contains="hockey-sticks", filters.state="available", block.column="layout", block.op="equals", block.value="lander-featured-categories".
-- "Draft supermodel pages with no blocks" → filters.type="model", filters.state="draft", has_block="none".
+- "Draft model landers with no blocks" → filters.query_contains="model", filters.state="draft", has_block="none".
 - "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".`;
 
 function clamp(value, allowed) {
