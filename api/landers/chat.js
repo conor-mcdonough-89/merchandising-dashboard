@@ -10,7 +10,7 @@ export const config = { runtime: 'edge' };
 const BLOCK_COLUMNS = ['layout', 'data_type', 'name', 'title', 'destination'];
 const STRING_OPS = ['equals', 'contains'];
 const NUM_OPS = ['>', '<', '>=', '<=', '=', 'between'];
-const LANDER_STATES = ['available', 'redirected', 'removed', 'draft'];
+const LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
 const TRISTATE = ['has', 'none', 'any'];
 
 const SYSTEM_PROMPT = `You are a query translator for SidelineSwap's landing-page (lander) tool. Operators describe what they're looking for in natural language; you translate that into a structured JSON filter spec.
@@ -33,7 +33,7 @@ Return JSON only matching this exact shape (use null for any unset field):
     "query_contains": <string|null>,
     "name_contains": <string|null>,
     "type": <string|null>,
-    "state": <"available"|"redirected"|"removed"|"draft"|null>,
+    "state": <"available"|"redirect"|"removed"|"draft"|null>,
     "discoverable": <true|false|null>,
     "available_count": { "op": ">|<|>=|<=|=|between", "value": <number or [lo,hi]> } | null,
     "has_page_view": "has" | "none" | null
@@ -53,7 +53,60 @@ Rules:
 - Map block keywords to columns intelligently. "top-models block" → block.column="layout", block.op="equals", block.value="top_models". "buying-guide block" → block.column="data_type", block.op="contains", block.value="buying_guide". "block named X" → column="name", op="contains".
 - "with more than one tile" → block.tile_count = { op: ">", value: 1 }.
 - "model" in the query field means query_contains="model".
-- If the request can't be expressed in this schema, return all-null filters and put a short note in explanation. Never invent SQL. Never return any other JSON shape.`;
+- If the request can't be expressed in this schema, return all-null filters and put a short note in explanation. Never invent SQL. Never return any other JSON shape.
+
+Natural-language vocabulary (operators speak in shorthand — translate it):
+
+Sport landers. "Golf landers", "baseball landers", "hockey landers" etc. are NOT a separate type — they mean landers whose slug contains the sport name. Map "<sport> landers" → slug_contains: "<sport>".
+
+Lander archetypes (colloquial — all map to slug_contains and/or type, NOT to a dedicated archetype field):
+- "parent category lander" → a sport-level slug like "hockey", "golf" (slug_contains the sport, no hyphens implied).
+- "child category lander" → a sport + sub-category slug like "hockey-sticks". Use slug_contains with the relevant token.
+- "relatable category lander" / "terminal category" → a leaf-category slug like "baseball-gloves".
+- "category detail lander" → slug combining a category with an attribute (e.g. "flex-85-hockey-sticks", "left-handed-baseball-gloves").
+- "brand category lander" / "brand detail lander" → slug combining a brand and category (e.g. "easton-baseball-bats", "bauer-hockey-sticks"). Use slug_contains with brand or "<brand>-<category>".
+- "model lander" / "supermodel page" / "best of" / "top models page" → type = "model" (the schema type, distinct from a brand category lander).
+
+Lander type mappings:
+- "general lander", "standard page", "results page" → type = "general".
+- "supermodel", "model page", "best of" → type = "model".
+- "navigation page", "merchandised page", "no results grid" → type = "navigation".
+- "category page", "category lander", "category-affiliated" → type = "category".
+
+State mappings:
+- "live", "published", "active page", "available" → state = "available".
+- "draft", "unpublished", "not live" → state = "draft".
+- "redirect", "301", "forwarded" → state = "redirect".
+- "removed", "deleted", "taken down" → state = "removed".
+
+Discoverability:
+- "discoverable", "surfaced in nav", "in site search" → discoverable = true.
+- "hidden", "not discoverable", "not in nav" → discoverable = false.
+
+Block layout vocabulary (block.column = "layout", block.op = "equals", block.value = …):
+- "top models", "popular models", "models carousel", "popular model carousel" → "top-models".
+- "results", "listings grid", "search results grid" → "results".
+- "FAQ", "model review", "Butter content", "CMS content", "collapsible content" → "collapsable-content-butter".
+- "blog", "articles", "editorial", "blog carousel", "blog post grid" → "blog-post-grid-3".
+- "trending", "horizontal scroll", "item carousel", "trending listings" → "item-grid-horizontal-scroll".
+- "featured categories", "category header", "merchandised categories" → "lander-featured-categories".
+- "SEO content", "content teaser", "content preview" → "content-preview".
+
+Block name/title/destination/data_type:
+- "block named X", "block called X" → block.column="name", op="contains", value="X".
+- "block titled X", "section heading X" → block.column="title", op="contains".
+- "block linking to X", "block destination X" → block.column="destination", op="contains".
+- "buying guide block", "block of type X" → block.column="data_type", op="contains".
+
+Tiles:
+- "with N tiles", "block has N items", "more than N items in the block" → block.tile_count.
+- "with at least one tile" → block.tile_count = { op: ">=", value: 1 }.
+
+Examples:
+- "Find me golf landers with popular model carousels" → filters.slug_contains="golf", block.enabled=true, block.column="layout", block.op="equals", block.value="top-models".
+- "Live hockey-stick category pages with a featured-categories header" → filters.slug_contains="hockey-sticks", filters.state="available", block.column="layout", block.op="equals", block.value="lander-featured-categories".
+- "Draft supermodel pages with no blocks" → filters.type="model", filters.state="draft", has_block="none".
+- "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".`;
 
 function clamp(value, allowed) {
   return allowed.includes(value) ? value : null;
