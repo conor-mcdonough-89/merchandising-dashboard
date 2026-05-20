@@ -15,8 +15,11 @@
     { "source": "/api/google/sheets-format", "destination": "/api/google/sheets-format" },
     { "source": "/api/google/sheets-read", "destination": "/api/google/sheets-read" },
     { "source": "/api/google/sheets-meta", "destination": "/api/google/sheets-meta" },
+    { "source": "/api/google/sheets-clear", "destination": "/api/google/sheets-clear" },
+    { "source": "/api/google/drive-list-sheets", "destination": "/api/google/drive-list-sheets" },
     { "source": "/api/conventions/list", "destination": "/api/conventions/list" },
     { "source": "/api/conventions/upsert", "destination": "/api/conventions/upsert" },
-    { "source": "/api/landers/chat", "destination": "/api/landers/chat" }
+    { "source": "/api/landers/chat", "destination": "/api/landers/chat" },
+    { "source": "/api/landers/bulk-action", "destination": "/api/landers/bulk-action" }
   ]
 }

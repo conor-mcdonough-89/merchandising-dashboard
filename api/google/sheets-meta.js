@@ -23,6 +23,7 @@ export default async function handler(req) {
     const meta = await getSpreadsheetMeta({
       access_token: payload.access_token,
       sheetId: payload.sheetId,
+      properties: payload.properties === true,
     });
     return json(meta);
   } catch (e) {

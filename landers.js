@@ -292,6 +292,17 @@ ORDER BY at.block_id, at.position ASC
   let _lastChatSpec = null;
   let _allLanders = null;
 
+  // Bulk-edit selection (in-memory; clears on tool re-mount). Holds lander
+  // ids the operator has checked for "Add to sheet with action".
+  let _selectedIds = new Set();
+  // Latest filtered view -- populated by renderResults so the floating bar
+  // and "select all in filter" can act on exactly what's on screen.
+  let _filteredView = [];
+  // Map<landerId, sheetEntry> -- mirrors the IndexedDB landers_sheet store
+  // for the pending-action badge on each row. Refreshed on tool open and
+  // after every sheet append.
+  let _landerSheetMap = new Map();
+
   function adminUrl(entity, id) {
     if (id == null) return null;
     // Map our internal entity names to admin paths. The user's message had
@@ -339,6 +350,8 @@ ORDER BY at.block_id, at.position ASC
     const main = document.getElementById('main');
     const meta = await Storage.loadLandersMeta();
     _allLanders = await Storage.listLanders();
+    await refreshLanderSheetMap();
+    _selectedIds = new Set();
 
     main.innerHTML = `
       <div class="landers-tool">
@@ -369,6 +382,7 @@ ORDER BY at.block_id, at.position ASC
         <div id="landers-results"></div>
         <div id="lander-detail" class="lander-detail hidden"></div>
       </div>
+      <div id="landers-bulk-bar" class="landers-bulk-bar hidden"></div>
     `;
 
     document.getElementById('landers-sync-btn').addEventListener('click', onSyncClick);
@@ -734,6 +748,7 @@ ORDER BY at.block_id, at.position ASC
     const wrap = document.getElementById('landers-results');
     if (!wrap) return;
     const rows = filterLanders();
+    _filteredView = rows;
     document.getElementById('landers-count').textContent =
       `${rows.length.toLocaleString()} match${rows.length === 1 ? '' : 'es'} of ${_allLanders.length.toLocaleString()} synced`;
 
@@ -744,11 +759,19 @@ ORDER BY at.block_id, at.position ASC
     const arrow = (col) => _state.sort.col === col ? (_state.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
     const th = (col, label) => `<th class="sortable" data-col="${col}">${label}${arrow(col)}</th>`;
 
+    // Header checkbox: checked when every displayed row is selected,
+    // indeterminate when some are.
+    const visibleIds = display.map((l) => Number(l.id));
+    const selectedVisible = visibleIds.filter((id) => _selectedIds.has(id)).length;
+    const allChecked = visibleIds.length > 0 && selectedVisible === visibleIds.length;
+    const someChecked = selectedVisible > 0 && !allChecked;
+
     wrap.innerHTML = `
       ${truncated ? `<p class="muted small" style="margin:6px 0;">Showing first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} — narrow the filters to see more.</p>` : ''}
       <table class="landers-table">
         <thead>
           <tr>
+            <th class="lf-check-col"><input type="checkbox" id="lf-select-all"${allChecked ? ' checked' : ''}></th>
             ${th('id', 'ID')}
             ${th('slug', 'Slug')}
             ${th('name', 'Name')}
@@ -769,6 +792,9 @@ ORDER BY at.block_id, at.position ASC
       </table>
     `;
 
+    const headCb = document.getElementById('lf-select-all');
+    if (headCb) headCb.indeterminate = someChecked;
+
     wrap.querySelectorAll('th.sortable').forEach((th) => {
       th.addEventListener('click', () => {
         const col = th.getAttribute('data-col');
@@ -782,13 +808,37 @@ ORDER BY at.block_id, at.position ASC
         persistAndRender();
       });
     });
+    if (headCb) {
+      headCb.addEventListener('change', () => {
+        if (headCb.checked) {
+          for (const id of visibleIds) _selectedIds.add(id);
+        } else {
+          for (const id of visibleIds) _selectedIds.delete(id);
+        }
+        renderResults();
+        renderBulkBar();
+      });
+    }
+    wrap.querySelectorAll('input.lf-row-select').forEach((cb) => {
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        const id = Number(cb.getAttribute('data-id'));
+        if (cb.checked) _selectedIds.add(id);
+        else _selectedIds.delete(id);
+        renderResults();
+        renderBulkBar();
+      });
+      cb.addEventListener('click', (e) => e.stopPropagation());
+    });
     wrap.querySelectorAll('tr[data-lander-id]').forEach((tr) => {
       tr.addEventListener('click', (e) => {
         if (e.target.closest('a')) return; // let admin link clicks pass through
+        if (e.target.closest('input.lf-row-select')) return; // checkbox handled above
         const id = Number(tr.getAttribute('data-lander-id'));
         openLanderDetail(id);
       });
     });
+    renderBulkBar();
   }
 
   function rowHtml(l) {
@@ -797,15 +847,32 @@ ORDER BY at.block_id, at.position ASC
     const rdUrl = adminUrl('lander', l.redirect_target_id);
     const stateTag = l.state ? `<span class="state-tag state-${escapeAttr(l.state)}">${escapeHtml(l.state)}</span>` : '';
     const discIcon = l.discoverable ? '✓' : '—';
+    const entry = _landerSheetMap.get(Number(l.id));
+    const pending = entry ? '<span class="lf-pending-badge" title="In bulk-import sheet">⏳ in sheet</span>' : '';
+    const rowClass = entry ? 'clickable lf-pending-row' : 'clickable';
+    const checked = _selectedIds.has(Number(l.id)) ? ' checked' : '';
+    // If the pending entry overrides state, name, or title_tag, show the
+    // diff inline so the operator can see what's queued.
+    const ov = entry ? entry.overrides || {} : {};
+    const nameCell = ov.name && ov.name !== l.name
+      ? `${escapeHtml(l.name)} <span class="lf-diff">→ ${escapeHtml(ov.name)}</span>`
+      : escapeHtml(l.name);
+    const titleTagCell = ov.title_tag && ov.title_tag !== l.title_tag
+      ? `${escapeHtml(l.title_tag)} <span class="lf-diff">→ ${escapeHtml(ov.title_tag)}</span>`
+      : escapeHtml(l.title_tag);
+    const stateCell = ov.state && ov.state !== l.state
+      ? `${stateTag} <span class="lf-diff">→ ${escapeHtml(ov.state)}</span>`
+      : stateTag;
     return `
-      <tr data-lander-id="${l.id}" class="clickable">
-        <td class="num">${l.id}</td>
+      <tr data-lander-id="${l.id}" class="${rowClass}">
+        <td class="lf-check-col"><input type="checkbox" class="lf-row-select" data-id="${l.id}"${checked}></td>
+        <td class="num">${l.id}${pending}</td>
         <td><code>${escapeHtml(l.slug)}</code></td>
-        <td>${escapeHtml(l.name)}</td>
-        <td class="muted small">${escapeHtml(l.title_tag)}</td>
+        <td>${nameCell}</td>
+        <td class="muted small">${titleTagCell}</td>
         <td>${escapeHtml(l.query)}</td>
         <td>${escapeHtml(l.type)}</td>
-        <td>${stateTag}</td>
+        <td>${stateCell}</td>
         <td>${discIcon}</td>
         <td class="num">${(l.available_count || 0).toLocaleString()}</td>
         <td>${l.page_view_id ? `<a href="${escapeAttr(pvUrl)}" target="_blank" rel="noopener">${l.page_view_id}</a>` : '—'}</td>
@@ -886,6 +953,308 @@ ORDER BY at.block_id, at.position ASC
     `;
   }
 
+  // ---- Bulk action bar + modal ----
+
+  function renderBulkBar() {
+    const bar = document.getElementById('landers-bulk-bar');
+    if (!bar) return;
+    if (_selectedIds.size === 0) {
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+      return;
+    }
+    const bound = global.Sheets && Sheets.loadLandersBinding();
+    const disabled = bound ? '' : ' disabled title="Create or link a bulk-import sheet in Settings first."';
+    bar.classList.remove('hidden');
+    bar.innerHTML = `
+      <span><strong>${_selectedIds.size}</strong> selected</span>
+      <button class="primary" id="lf-bulk-action-btn"${disabled}>Add to sheet with action…</button>
+      <button class="ghost" id="lf-bulk-clear">Clear selection</button>
+      ${bound ? '' : '<span class="muted small">No bulk-import sheet bound — open ⚙ Settings.</span>'}
+    `;
+    const btn = document.getElementById('lf-bulk-action-btn');
+    if (btn && !btn.disabled) btn.addEventListener('click', openBulkActionModal);
+    document.getElementById('lf-bulk-clear').addEventListener('click', () => {
+      _selectedIds.clear();
+      renderResults();
+    });
+  }
+
+  function openBulkActionModal() {
+    const existing = document.getElementById('lf-bulk-modal');
+    if (existing) existing.remove();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'lf-bulk-modal';
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" style="max-width: 560px;">
+        <header>
+          <h2>Bulk action on ${_selectedIds.size} lander${_selectedIds.size === 1 ? '' : 's'}</h2>
+          <button class="close" id="lf-bulk-close">×</button>
+        </header>
+        <div class="body" style="padding: 18px 22px;">
+          <p class="muted small" style="margin-bottom: 10px;">
+            Describe the change in plain English. Editable fields:
+            <strong>state</strong>, <strong>discoverable</strong>,
+            <strong>redirect_target_id</strong>, <strong>title_tag</strong>,
+            <strong>name</strong>, <strong>show_categories</strong>.
+          </p>
+          <textarea id="lf-bulk-message" rows="4" style="width:100%;" placeholder="e.g. Set all of these landers to removed."></textarea>
+          <div id="lf-bulk-status" class="muted small" style="margin-top: 10px;"></div>
+        </div>
+        <footer style="display:flex;gap:8px;padding:14px 22px;">
+          <div class="spacer"></div>
+          <button class="ghost" id="lf-bulk-cancel">Cancel</button>
+          <button class="primary" id="lf-bulk-apply">Apply</button>
+        </footer>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    const close = () => backdrop.remove();
+    document.getElementById('lf-bulk-close').addEventListener('click', close);
+    document.getElementById('lf-bulk-cancel').addEventListener('click', close);
+    const msgEl = document.getElementById('lf-bulk-message');
+    msgEl.focus();
+    document.getElementById('lf-bulk-apply').addEventListener('click', () => runBulkAction(msgEl.value, close));
+    msgEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        runBulkAction(msgEl.value, close);
+      }
+    });
+  }
+
+  async function runBulkAction(message, closeFn) {
+    const text = (message || '').trim();
+    const status = document.getElementById('lf-bulk-status');
+    const applyBtn = document.getElementById('lf-bulk-apply');
+    if (!text) { status.textContent = 'Type a request first.'; return; }
+    const bound = global.Sheets && Sheets.loadLandersBinding();
+    if (!bound) { status.textContent = 'No bulk-import sheet bound. Open ⚙ Settings to create or link one.'; return; }
+    applyBtn.disabled = true;
+    status.textContent = 'Translating…';
+    status.style.color = '';
+
+    const idSet = new Set(_selectedIds);
+    const landers = _allLanders.filter((l) => idSet.has(Number(l.id)));
+    if (!landers.length) { status.textContent = 'No selected landers found in the local cache.'; applyBtn.disabled = false; return; }
+
+    let spec;
+    try {
+      const res = await fetch('/api/landers/bulk-action', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: text, landers: landers.map(slimForLLM) }),
+      });
+      spec = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(spec.error || `HTTP ${res.status}`);
+    } catch (e) {
+      status.textContent = 'Translate failed: ' + e.message;
+      status.style.color = 'var(--red)';
+      applyBtn.disabled = false;
+      return;
+    }
+    const overrides = spec && spec.overrides ? spec.overrides : {};
+    if (!Object.keys(overrides).length) {
+      status.textContent = (spec && spec.explanation) || 'No editable changes were inferred from that request.';
+      status.style.color = 'var(--red)';
+      applyBtn.disabled = false;
+      return;
+    }
+
+    status.textContent = `Applying "${spec.explanation || 'overrides'}" to ${landers.length} lander${landers.length === 1 ? '' : 's'}…`;
+
+    try {
+      await applyOverridesToLanders(landers, overrides);
+      status.textContent = 'Done.';
+      status.style.color = '';
+      _selectedIds.clear();
+      await refreshLanderSheetMap();
+      renderResults();
+      setTimeout(closeFn, 600);
+    } catch (e) {
+      status.textContent = 'Apply failed: ' + e.message;
+      status.style.color = 'var(--red)';
+      applyBtn.disabled = false;
+    }
+  }
+
+  function slimForLLM(l) {
+    return {
+      id: l.id, slug: l.slug, name: l.name, state: l.state, type: l.type,
+      discoverable: l.discoverable === 1 || l.discoverable === true,
+      redirect_target_id: l.redirect_target_id,
+    };
+  }
+
+  // For each lander: read-modify-write the IndexedDB landers_sheet entry
+  // (snapshot + overrides), then either append a fresh row to the Landers
+  // tab or update the existing row in place if we've appended it before.
+  // Highlights the changed cells yellow. Failure on a single lander is
+  // logged but doesn't abort the batch -- partial progress is better than
+  // none, and IndexedDB still has the entry for retry.
+  async function applyOverridesToLanders(landers, overrides) {
+    const HEADERS = (global.Templates && global.Templates.LANDER_TEMPLATE_HEADERS) || [];
+    if (!HEADERS.length) throw new Error('Templates.LANDER_TEMPLATE_HEADERS not loaded.');
+    const changedCols = computeChangedColumns(overrides, HEADERS);
+
+    // Buffer fresh appends so we can submit them in one Sheets API call --
+    // each appendRowsToTab call returns updates.updatedRange covering the
+    // contiguous block of rows it appended, which we then slice per entry.
+    const freshLanders = [];
+    const freshEntries = [];
+    const updates = [];        // [{ entry, row }]
+
+    for (const lander of landers) {
+      const existing = await Storage.loadLanderSheetEntry(Number(lander.id));
+      const source = existing && existing.source ? existing.source : snapshotLander(lander);
+      const mergedOverrides = { ...(existing && existing.overrides || {}), ...overrides };
+      const row = buildLanderRow(source, mergedOverrides, HEADERS);
+      const entryCommon = {
+        landerId: Number(lander.id),
+        source,
+        overrides: overrides,    // addLanderSheetEntry deep-merges these
+        changedColumns: changedCols,
+      };
+      if (existing && existing.sheetRowRange) {
+        updates.push({ entry: entryCommon, range: existing.sheetRowRange, row });
+      } else {
+        freshLanders.push(lander);
+        freshEntries.push({ entry: entryCommon, row });
+      }
+    }
+
+    // 1) Append fresh rows in one shot.
+    if (freshEntries.length) {
+      const rows = freshEntries.map((f) => f.row);
+      const result = await Sheets.appendRowsToTab('Landers', rows);
+      const updatedRange = result && result.updates && result.updates.updatedRange;
+      const ranges = splitRangePerRow(updatedRange, rows.length);
+      for (let i = 0; i < freshEntries.length; i++) {
+        const f = freshEntries[i];
+        const rng = ranges[i] || null;
+        await Storage.addLanderSheetEntry({ ...f.entry, sheetRowRange: rng });
+        if (rng && changedCols.length) {
+          try {
+            await Sheets.highlightCellsOnLandersBinding({ tabName: 'Landers', range: rng, columnIndices: changedCols });
+          } catch (e) { console.warn('highlight failed', e); }
+        }
+      }
+    }
+
+    // 2) Update existing rows in place.
+    for (const u of updates) {
+      try {
+        await Sheets.updateRowOnLandersBinding(u.range, u.row);
+        await Storage.addLanderSheetEntry({ ...u.entry, sheetRowRange: u.range });
+        if (changedCols.length) {
+          try {
+            await Sheets.highlightCellsOnLandersBinding({ tabName: 'Landers', range: u.range, columnIndices: changedCols });
+          } catch (e) { console.warn('highlight failed', e); }
+        }
+      } catch (e) {
+        console.warn('updateRow failed for lander', u.entry.landerId, e);
+      }
+    }
+  }
+
+  // Compute zero-based column indices that the overrides touch.
+  function computeChangedColumns(overrides, headers) {
+    const map = {
+      state: 'state',
+      discoverable: 'discoverable',
+      redirect_target_id: 'redirect_target_id',
+      title_tag: 'title_tag',
+      name: 'name',
+      show_categories: 'show_categories',
+    };
+    const cols = [];
+    for (const k of Object.keys(overrides || {})) {
+      const colName = map[k];
+      if (!colName) continue;
+      const idx = headers.indexOf(colName);
+      if (idx >= 0) cols.push(idx);
+    }
+    return cols;
+  }
+
+  // Snapshot the fields the bulk-import row needs from a synced lander.
+  // The synced cache holds a light projection (see normalizeLander); fields
+  // we don't have (canonical_id, models_category_id, synonyms,
+  // show_categories, show_categories_no_images, description) are written
+  // blank and engineering's importer keeps the existing DB value.
+  function snapshotLander(l) {
+    return {
+      id: l.id,
+      slug: l.slug || '',
+      redirect_target_id: l.redirect_target_id == null ? '' : l.redirect_target_id,
+      canonical_id: '',
+      type: l.type || '',
+      state: l.state || '',
+      models_category_id: '',
+      page_view_id: l.page_view_id == null ? '' : l.page_view_id,
+      name: l.name || '',
+      title_tag: l.title_tag || '',
+      query: l.query || '',
+      synonyms: '',
+      discoverable: l.discoverable === 1 || l.discoverable === true ? 'true' : 'false',
+      show_categories: '',
+      show_categories_no_images: '',
+      description: '',
+    };
+  }
+
+  function buildLanderRow(source, overrides, headers) {
+    const merged = { ...source };
+    if (overrides) {
+      for (const k of Object.keys(overrides)) {
+        if (overrides[k] === null || overrides[k] === undefined) continue;
+        if (typeof overrides[k] === 'boolean') merged[k] = overrides[k] ? 'true' : 'false';
+        else merged[k] = overrides[k];
+      }
+    }
+    return headers.map((h) => {
+      const v = merged[h];
+      if (v === null || v === undefined) return '';
+      return String(v);
+    });
+  }
+
+  // Sheets' appendValues returns one updatedRange covering all appended
+  // rows -- "Landers!A4:P7" for four 16-column rows. Split it into a
+  // per-row range so each entry's sheetRowRange targets just one row.
+  function splitRangePerRow(updatedRange, count) {
+    if (!updatedRange || !count) return [];
+    const m = /^([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(updatedRange);
+    if (!m) return new Array(count).fill(updatedRange);
+    const [_, tab, colA, rowA, colB] = m;
+    const startRow = parseInt(rowA, 10);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const r = startRow + i;
+      out.push(`${tab}!${colA}${r}:${colB}${r}`);
+    }
+    return out;
+  }
+
+  async function refreshLanderSheetMap() {
+    try {
+      const entries = await Storage.listLanderSheetEntries();
+      _landerSheetMap = new Map(entries.map((e) => [Number(e.landerId), e]));
+    } catch (_) {
+      _landerSheetMap = new Map();
+    }
+  }
+
+  // Public hook for the Settings UI -- after "Clear sheet contents" wipes
+  // the bound Google Sheet, dashboard.js calls this to drop the local
+  // IndexedDB shadow + refresh the row badges.
+  async function onBulkSheetCleared() {
+    await Storage.clearLanderSheet();
+    await refreshLanderSheetMap();
+    if (document.getElementById('landers-results')) renderResults();
+  }
+
   async function onSyncClick() {
     const btn = document.getElementById('landers-sync-btn');
     const status = document.getElementById('landers-sync-status');
@@ -928,5 +1297,5 @@ ORDER BY at.block_id, at.position ASC
     };
   }
 
-  global.LandersTool = { render };
+  global.LandersTool = { render, onBulkSheetCleared };
 })(window);

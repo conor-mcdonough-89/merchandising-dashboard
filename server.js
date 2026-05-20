@@ -197,9 +197,12 @@ const EDGE_ROUTES = [
   { path: '/api/google/sheets-format',    module: './api/google/sheets-format.js' },
   { path: '/api/google/sheets-read',      module: './api/google/sheets-read.js' },
   { path: '/api/google/sheets-meta',      module: './api/google/sheets-meta.js' },
+  { path: '/api/google/sheets-clear',     module: './api/google/sheets-clear.js' },
+  { path: '/api/google/drive-list-sheets', module: './api/google/drive-list-sheets.js' },
   { path: '/api/conventions/list',        module: './api/conventions/list.js' },
   { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
   { path: '/api/landers/chat',            module: './api/landers/chat.js' },
+  { path: '/api/landers/bulk-action',     module: './api/landers/bulk-action.js' },
 ];
 
 const _edgeCache = new Map();

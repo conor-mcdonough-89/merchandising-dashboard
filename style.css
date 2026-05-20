@@ -1410,3 +1410,65 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .lander-tile a { font-family: 'DM Mono', monospace; font-size: 12px; }
 .lander-tile strong { margin-left: 6px; }
 .lander-tile code { margin-left: 6px; }
+
+/* Landers bulk-edit: per-row checkboxes, pending badges, floating action bar */
+.landers-table th.lf-check-col,
+.landers-table td.lf-check-col {
+  width: 28px;
+  padding-left: 6px;
+  padding-right: 0;
+  text-align: center;
+}
+.lf-row-select { cursor: pointer; }
+.lf-pending-row { background: rgba(255, 244, 191, 0.35); }
+.lf-pending-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  border-radius: 3px;
+  background: rgba(255, 220, 60, 0.25);
+  color: #8a6d00;
+  border: 1px solid rgba(170, 130, 0, 0.35);
+  white-space: nowrap;
+}
+.lf-diff {
+  color: var(--accent2);
+  font-weight: 500;
+  margin-left: 4px;
+}
+.landers-bulk-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--text);
+  color: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  z-index: 100;
+  font-size: 14px;
+}
+.landers-bulk-bar.hidden { display: none; }
+.landers-bulk-bar .primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.landers-bulk-bar .primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.landers-bulk-bar .ghost {
+  background: transparent;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.landers-bulk-bar .muted { color: rgba(255, 255, 255, 0.7); }

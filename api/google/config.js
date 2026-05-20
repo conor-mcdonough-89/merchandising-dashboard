@@ -2,7 +2,7 @@
 // to start the authorization flow (client id + redirect uri). client_secret
 // stays server-side and is never returned here.
 
-import { getEnv, json } from '../google.js';
+import { getEnv, GOOGLE_SCOPES, json } from '../google.js';
 
 export const config = { runtime: 'edge' };
 
@@ -17,6 +17,6 @@ export default async function handler(req) {
   return json({
     clientId: env.clientId,
     redirectUri: env.redirectUri,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    scopes: GOOGLE_SCOPES,
   });
 }

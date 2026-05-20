@@ -26,6 +26,7 @@ export default async function handler(req) {
       access_token: payload.access_token,
       sheetId: payload.sheetId,
       rows: payload.rows,
+      tab: typeof payload.tab === 'string' && payload.tab ? payload.tab : undefined,
     });
     return json({
       appended: payload.rows.length,

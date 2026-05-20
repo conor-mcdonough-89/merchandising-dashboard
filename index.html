@@ -188,9 +188,6 @@
       </header>
       <div class="body" style="padding: 18px 22px;">
         <h3 style="font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:2px;color:var(--accent);margin-bottom:8px;">Google Sheets</h3>
-        <p class="muted small" style="margin-bottom:10px;">
-          Stream approved proposals to a live Google Sheet instead of waiting for the CSV export. Connect your Google account, then create a new sheet — every approval (manual or LLM-driven) appends a row.
-        </p>
         <div class="row-flex" style="margin-bottom: 10px;">
           <span>Status:</span>
           <span id="google-status"><span class="tag pending">Not connected</span></span>
@@ -199,14 +196,39 @@
           <button class="ghost" id="connect-google">Connect Google</button>
           <button class="ghost" id="disconnect-google" disabled>Disconnect</button>
         </div>
+
         <div class="settings-divider"></div>
-        <div class="row-flex" style="gap: 8px; margin-top: 14px;">
+        <h4 style="font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:2px;margin-top:14px;margin-bottom:6px;">Models bulk-import sheet</h4>
+        <p class="muted small" style="margin-bottom:10px;">
+          Single tab. Used by the Model Cleanup tool — every Merge / Rename / State approval appends a row.
+        </p>
+        <div class="row-flex" style="gap: 8px;">
           <input type="text" id="sheet-title" placeholder="Sheet title (optional)" style="flex:1;">
           <button class="primary" id="create-sheet" disabled>Create Sheet</button>
         </div>
         <div id="sheet-binding" class="settings-binding" style="margin-top: 12px;">
           <span class="muted small">No Sheet bound.</span>
         </div>
+
+        <div class="settings-divider" style="margin-top:18px;"></div>
+        <h4 style="font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:2px;margin-top:14px;margin-bottom:6px;">Bulk-import sheet (Landers · Blocks · Page Views · Tiles)</h4>
+        <p class="muted small" style="margin-bottom:10px;">
+          Four-tab sheet used by the Landing Page Query tool's bulk-action flow. One sheet at a time; pick an existing one or create fresh.
+        </p>
+        <div class="row-flex" style="gap: 8px;">
+          <input type="text" id="bulk-sheet-title" placeholder="Sheet title (optional)" style="flex:1;">
+          <button class="primary" id="bulk-create-sheet" disabled>Create New Sheet</button>
+          <button class="ghost" id="bulk-browse-sheets" disabled>Browse existing…</button>
+        </div>
+        <div id="bulk-sheet-binding" class="settings-binding" style="margin-top: 12px;">
+          <span class="muted small">No bulk-import sheet bound.</span>
+        </div>
+        <div class="row-flex" style="gap: 8px; margin-top: 12px;">
+          <div class="spacer"></div>
+          <button class="ghost" id="bulk-clear-sheet" disabled>Clear sheet contents</button>
+          <button class="ghost" id="bulk-disconnect-sheet" disabled>Disconnect this sheet</button>
+        </div>
+        <div id="bulk-browse-results" class="hidden" style="margin-top:12px;border:1px solid var(--border);border-radius:6px;padding:8px;max-height:240px;overflow-y:auto;"></div>
       </div>
       <footer>
         <div class="spacer"></div>
@@ -318,6 +340,7 @@
 
   <!-- App scripts. Order matters. -->
   <script src="storage.js"></script>
+  <script src="templates.js"></script>
   <script src="metabase.js"></script>
   <script src="sheets.js"></script>
   <script src="clustering.js"></script>

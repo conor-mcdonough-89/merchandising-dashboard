@@ -12,14 +12,34 @@
 //      the access_token before each Sheets call.
 //
 // Storage:
-//   localStorage['merch-google-tokens']  -> { access_token, refresh_token, expires_at }
-//   localStorage['merch-sheets-binding'] -> { sheetId, url, title, createdAt }
+//   localStorage['merch-google-tokens']           -> { access_token, refresh_token, expires_at }
+//   localStorage['merch-sheets-binding']          -> { sheetId, url, gid, title, createdAt }
+//     The models-tool single-tab sheet (untouched).
+//   localStorage['merch-landers-sheets-binding']  -> { sheetId, url, title, createdAt,
+//                                                      tabs: [{ name, gid }] }
+//     The multi-tab bulk-import sheet (Landers + Blocks + PVBR + BTR). Held
+//     under a separate key so the two flows never collide.
 
 (function (global) {
   const TOKENS_KEY = 'merch-google-tokens';
   const BINDING_KEY = 'merch-sheets-binding';
+  const LANDERS_BINDING_KEY = 'merch-landers-sheets-binding';
   const STATE_KEY = 'merch-google-oauth-state';
   const VERIFIER_KEY = 'merch-google-pkce-verifier';
+
+  // Required tab names for the multi-tab bulk-import sheet. Read from
+  // Templates.BULK_IMPORT_TABS if it's loaded; fall back to the hardcoded
+  // list so this module doesn't blow up if loaded out of order.
+  function requiredBulkTabs() {
+    const t = global.Templates && global.Templates.BULK_IMPORT_TABS;
+    if (Array.isArray(t) && t.length) return t;
+    return [
+      { name: 'Landers', headerRow: [] },
+      { name: 'Blocks', headerRow: [] },
+      { name: 'Page View Block Relations', headerRow: [] },
+      { name: 'Block Tile Relations', headerRow: [] },
+    ];
+  }
 
   const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 
@@ -48,6 +68,22 @@
   function saveBinding(b) {
     if (!b) localStorage.removeItem(BINDING_KEY);
     else localStorage.setItem(BINDING_KEY, JSON.stringify(b));
+  }
+
+  function loadLandersBinding() {
+    try {
+      const raw = localStorage.getItem(LANDERS_BINDING_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function saveLandersBinding(b) {
+    if (!b) localStorage.removeItem(LANDERS_BINDING_KEY);
+    else localStorage.setItem(LANDERS_BINDING_KEY, JSON.stringify(b));
+  }
+  function disconnectLandersBinding() {
+    saveLandersBinding(null);
   }
 
   // -------- PKCE helpers --------
@@ -369,6 +405,201 @@
     return map;
   }
 
+  // -------- Multi-tab bulk-import sheet (Landers + Blocks + PVBR + BTR) --------
+  //
+  // These methods operate on a SEPARATE binding from the models-tool sheet so
+  // the two flows never collide. All take/return the landers binding shape:
+  //   { sheetId, url, title, createdAt, tabs: [{ name, gid }] }
+
+  // Create the four-tab sheet from Templates.BULK_IMPORT_TABS. Persists the
+  // binding to localStorage and returns it.
+  async function createBulkImportSheet(title) {
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google. Connect first.');
+    const tabs = requiredBulkTabs();
+    const res = await fetch('/api/google/sheets-create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        access_token,
+        title,
+        worksheets: tabs.map((t) => ({ name: t.name, headerRow: t.headerRow })),
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets create ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const binding = {
+      sheetId: data.sheetId,
+      url: data.url,
+      title: title || 'SidelineSwap Merch Bulk Import',
+      createdAt: new Date().toISOString(),
+      tabs: Array.isArray(data.tabs) ? data.tabs : [],
+    };
+    saveLandersBinding(binding);
+    return binding;
+  }
+
+  // Validate that `sheetId` is a real spreadsheet the operator has access to
+  // AND that it has the four required tabs. On success, persists the binding
+  // and returns it. Throws with a useful message otherwise.
+  async function linkExistingSheet(sheetId) {
+    if (!sheetId || typeof sheetId !== 'string') throw new Error('Sheet id required.');
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google. Connect first.');
+    const res = await fetch('/api/google/sheets-meta', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId, properties: true }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets meta ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const tabs = Array.isArray(data.tabs) ? data.tabs : [];
+    const required = requiredBulkTabs().map((t) => t.name);
+    const missing = required.filter((name) => !tabs.find((t) => t.name === name));
+    if (missing.length) {
+      throw new Error(`Linked sheet is missing required tab(s): ${missing.join(', ')}. Create a new sheet instead, or add these tabs manually.`);
+    }
+    const binding = {
+      sheetId,
+      url: `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/edit`,
+      title: data.spreadsheetTitle || tabs[0].name || 'Linked sheet',
+      createdAt: new Date().toISOString(),
+      tabs: required.map((name) => {
+        const t = tabs.find((x) => x.name === name);
+        return { name, gid: t ? t.gid : 0 };
+      }),
+    };
+    saveLandersBinding(binding);
+    return binding;
+  }
+
+  async function listDriveSheetsCall() {
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google. Connect first.');
+    const res = await fetch('/api/google/drive-list-sheets', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Drive list ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    return Array.isArray(data.files) ? data.files : [];
+  }
+
+  // Append rows to a specific tab on the landers binding. Returns the same
+  // payload the underlying endpoint returns (so callers can pull
+  // updates.updatedRange for later in-place updates).
+  async function appendRowsToTab(tabName, rows) {
+    const binding = loadLandersBinding();
+    if (!binding) throw new Error('No bulk-import sheet bound. Create or link one in Settings.');
+    if (!Array.isArray(rows) || !rows.length) return { appended: 0 };
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google. Connect first.');
+    const res = await fetch('/api/google/sheets-append', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, rows, tab: tabName }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets append ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  // Overwrite a previously-appended row (on any tab) in place. `range` is
+  // the worksheet-qualified A1 returned by appendRowsToTab.
+  async function updateRowOnLandersBinding(range, row) {
+    const binding = loadLandersBinding();
+    if (!binding) throw new Error('No bulk-import sheet bound.');
+    if (!range) throw new Error('updateRowOnLandersBinding requires a range');
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const res = await fetch('/api/google/sheets-update', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, range, row }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets update ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  // Yellow-highlight changed cells on the landers binding. `range` is a
+  // worksheet-qualified A1 (e.g. "Landers!A4:P4"); `tabName` resolves the
+  // correct gid for spreadsheets.batchUpdate.
+  async function highlightCellsOnLandersBinding({ tabName, range, columnIndices }) {
+    const binding = loadLandersBinding();
+    if (!binding) throw new Error('No bulk-import sheet bound.');
+    if (!range || !Array.isArray(columnIndices) || !columnIndices.length) return { skipped: true };
+    const tab = (binding.tabs || []).find((t) => t.name === tabName);
+    if (!tab) throw new Error(`Tab not found in binding: ${tabName}`);
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const rowIndex = parseRowIndexFromRange(range);
+    if (rowIndex < 0) throw new Error(`Couldn't parse row from range: ${range}`);
+    const requests = columnIndices.map((col) => ({
+      repeatCell: {
+        range: {
+          sheetId: tab.gid,
+          startRowIndex: rowIndex,
+          endRowIndex: rowIndex + 1,
+          startColumnIndex: col,
+          endColumnIndex: col + 1,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 1.0, green: 0.95, blue: 0.5, alpha: 1 },
+          },
+        },
+        fields: 'userEnteredFormat.backgroundColor',
+      },
+    }));
+    const res = await fetch('/api/google/sheets-format', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, requests }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets format ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  // Wipe data rows on all four tabs while preserving headers (A1).
+  async function clearBulkImportSheet() {
+    const binding = loadLandersBinding();
+    if (!binding) throw new Error('No bulk-import sheet bound.');
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const tabs = (binding.tabs && binding.tabs.length)
+      ? binding.tabs.map((t) => t.name)
+      : requiredBulkTabs().map((t) => t.name);
+    const ranges = tabs.map((name) => `${name}!A2:Z`);
+    const res = await fetch('/api/google/sheets-clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, ranges }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets clear ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
   global.Sheets = {
     startAuth,
     disconnect,
@@ -379,5 +610,15 @@
     updateRow,
     highlightCells,
     readPendingActions,
+    // Multi-tab bulk-import sheet (landers binding):
+    loadLandersBinding,
+    disconnectLandersBinding,
+    createBulkImportSheet,
+    linkExistingSheet,
+    listDriveSheets: listDriveSheetsCall,
+    appendRowsToTab,
+    updateRowOnLandersBinding,
+    highlightCellsOnLandersBinding,
+    clearBulkImportSheet,
   };
 })(window);

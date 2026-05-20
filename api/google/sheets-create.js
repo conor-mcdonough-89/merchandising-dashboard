@@ -19,14 +19,19 @@ export default async function handler(req) {
   if (!payload || !payload.access_token) {
     return json({ error: 'access_token is required' }, { status: 400 });
   }
-  if (!Array.isArray(payload.headerRow) || !payload.headerRow.length) {
-    return json({ error: 'headerRow is required' }, { status: 400 });
+  // Accept either { headerRow } (legacy single-tab) or { worksheets: [...] }
+  // (multi-tab bulk-import flow). At least one must be present.
+  const hasLegacy = Array.isArray(payload.headerRow) && payload.headerRow.length;
+  const hasMulti = Array.isArray(payload.worksheets) && payload.worksheets.length;
+  if (!hasLegacy && !hasMulti) {
+    return json({ error: 'headerRow or worksheets is required' }, { status: 400 });
   }
   try {
     const result = await createSpreadsheet({
       access_token: payload.access_token,
       title: payload.title,
       headerRow: payload.headerRow,
+      worksheets: payload.worksheets,
     });
     return json(result);
   } catch (e) {

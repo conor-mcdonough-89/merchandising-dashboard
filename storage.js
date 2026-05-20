@@ -18,7 +18,7 @@
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const REJECTION_TTL_DAYS = 30;
 
   let _dbPromise = null;
@@ -62,6 +62,12 @@
         }
         if (!db.objectStoreNames.contains('landers_meta')) {
           db.createObjectStore('landers_meta', { keyPath: 'key' });
+        }
+        // v3 -> v4: landers bulk-import sheet entries. Same read-modify-write
+        // pattern as the models `sheet` store -- one record per landerId,
+        // layered overrides merge into it across multiple actions.
+        if (!db.objectStoreNames.contains('landers_sheet')) {
+          db.createObjectStore('landers_sheet', { keyPath: 'landerId' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -305,6 +311,54 @@
     const store = await tx('landers', 'readwrite');
     return promisify(store.clear());
   }
+  // -------- landers_sheet (in-progress lander bulk-import) --------
+  // Read-modify-write so layered actions on the same lander (e.g. state then
+  // discoverable) merge into one record. Record shape:
+  // {
+  //   landerId: 12345,
+  //   source: { id, slug, type, state, discoverable, redirect_target_id,
+  //             name, title_tag, ... full snapshot of the row at first action },
+  //   overrides: { state?, discoverable?, redirect_target_id?, name?,
+  //                title_tag?, show_categories? },
+  //   sheetRowRange: 'Landers!A4:P4',   // stashed after first append
+  //   changedColumns: [5, 12],          // zero-based, for yellow highlighting
+  //   addedAt, updatedAt
+  // }
+  async function addLanderSheetEntry(entry) {
+    if (!entry || entry.landerId == null) throw new Error('landerId is required');
+    const store = await tx('landers_sheet', 'readwrite');
+    const existing = await promisify(store.get(entry.landerId));
+    const merged = {
+      ...(existing || {}),
+      ...entry,
+      // Deep-merge overrides + changedColumns so layered actions accumulate.
+      overrides: { ...((existing && existing.overrides) || {}), ...(entry.overrides || {}) },
+      changedColumns: Array.from(new Set([
+        ...((existing && existing.changedColumns) || []),
+        ...((entry.changedColumns) || []),
+      ])),
+      addedAt:   (existing && existing.addedAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    return promisify(store.put(merged));
+  }
+  async function loadLanderSheetEntry(landerId) {
+    const store = await tx('landers_sheet', 'readonly');
+    return promisify(store.get(landerId));
+  }
+  async function removeLanderSheetEntry(landerId) {
+    const store = await tx('landers_sheet', 'readwrite');
+    return promisify(store.delete(landerId));
+  }
+  async function listLanderSheetEntries() {
+    const store = await tx('landers_sheet', 'readonly');
+    return promisify(store.getAll());
+  }
+  async function clearLanderSheet() {
+    const store = await tx('landers_sheet', 'readwrite');
+    return promisify(store.clear());
+  }
+
   async function saveLandersMeta(meta) {
     const store = await tx('landers_meta', 'readwrite');
     return promisify(store.put({ key: 'singleton', ...meta }));
@@ -323,5 +377,7 @@
     recordDecision, getRejections, clearExpiredDecisions, clearRejectionsForSourceIds,
     addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
     putLanders, listLanders, clearLanders, saveLandersMeta, loadLandersMeta,
+    addLanderSheetEntry, loadLanderSheetEntry, removeLanderSheetEntry,
+    listLanderSheetEntries, clearLanderSheet,
   };
 })(window);

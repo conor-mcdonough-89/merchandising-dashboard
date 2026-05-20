@@ -248,6 +248,10 @@
     document.getElementById('connect-google').addEventListener('click', connectGoogleSheets);
     document.getElementById('disconnect-google').addEventListener('click', disconnectGoogleSheets);
     document.getElementById('create-sheet').addEventListener('click', createGoogleSheet);
+    document.getElementById('bulk-create-sheet').addEventListener('click', createBulkImportSheet);
+    document.getElementById('bulk-browse-sheets').addEventListener('click', browseExistingBulkSheets);
+    document.getElementById('bulk-clear-sheet').addEventListener('click', clearBulkImportSheet);
+    document.getElementById('bulk-disconnect-sheet').addEventListener('click', disconnectBulkImportSheet);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         ['sync-modal', 'proposal-modal', 'convention-modal', 'confirm-modal', 'settings-modal', 'rename-run-modal']
@@ -2725,6 +2729,7 @@
   function renderSettingsBody() {
     const connected = global.Sheets && Sheets.isConnected();
     const binding = global.Sheets ? Sheets.loadBinding() : null;
+    const bulkBinding = global.Sheets ? Sheets.loadLandersBinding() : null;
     document.getElementById('google-status').innerHTML = connected
       ? `<span class="tag available">Connected</span>`
       : `<span class="tag pending">Not connected</span>`;
@@ -2742,6 +2747,109 @@
     } else {
       bindingEl.innerHTML = `<span class="muted small">No Sheet bound. Connect Google, then click <strong>Create Sheet</strong> to make a new bulk-import sheet.</span>`;
     }
+
+    // Bulk-import (multi-tab) sheet pane.
+    document.getElementById('bulk-create-sheet').disabled = !connected;
+    document.getElementById('bulk-browse-sheets').disabled = !connected;
+    document.getElementById('bulk-clear-sheet').disabled = !connected || !bulkBinding;
+    document.getElementById('bulk-disconnect-sheet').disabled = !bulkBinding;
+    const bulkEl = document.getElementById('bulk-sheet-binding');
+    if (bulkBinding) {
+      const tabs = (bulkBinding.tabs || []).map((t) => escapeHtml(t.name)).join(' · ');
+      bulkEl.innerHTML = `
+        <div><strong>${escapeHtml(bulkBinding.title || 'Bulk-import sheet')}</strong></div>
+        <div class="muted small"><a href="${escapeAttr(bulkBinding.url)}" target="_blank" rel="noopener">${escapeHtml(bulkBinding.url)}</a></div>
+        <div class="muted small">Tabs: ${tabs || '(unknown)'}</div>
+        <div class="muted small">Created ${formatRelative(bulkBinding.createdAt)}.</div>
+      `;
+    } else {
+      bulkEl.innerHTML = `<span class="muted small">No bulk-import sheet bound. Connect Google, then create new or pick an existing one.</span>`;
+    }
+  }
+
+  async function createBulkImportSheet() {
+    if (!global.Sheets || !Sheets.isConnected()) return toast('Connect to Google first.', 'error');
+    const titleInput = document.getElementById('bulk-sheet-title');
+    const title = (titleInput.value || '').trim() || `SidelineSwap Bulk Import — ${new Date().toISOString().slice(0, 10)}`;
+    try {
+      const binding = await Sheets.createBulkImportSheet(title);
+      toast(`Bulk-import sheet created: ${binding.url}`, 'ok');
+    } catch (e) {
+      toast('Create failed: ' + e.message, 'error');
+    }
+    renderSettingsBody();
+  }
+
+  async function browseExistingBulkSheets() {
+    if (!global.Sheets || !Sheets.isConnected()) return toast('Connect to Google first.', 'error');
+    const wrap = document.getElementById('bulk-browse-results');
+    wrap.classList.remove('hidden');
+    wrap.innerHTML = `<span class="muted small">Loading your Google Sheets…</span>`;
+    let files;
+    try {
+      files = await Sheets.listDriveSheets();
+    } catch (e) {
+      wrap.innerHTML = `<span class="muted small" style="color:var(--red);">Failed: ${escapeHtml(e.message)}</span>`;
+      return;
+    }
+    if (!files.length) {
+      wrap.innerHTML = `<span class="muted small">No sheets found in your Drive.</span>`;
+      return;
+    }
+    wrap.innerHTML = files.map((f) => `
+      <div class="row-flex" style="padding:6px 0;gap:8px;border-bottom:1px solid var(--border);">
+        <div style="flex:1;min-width:0;">
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${escapeHtml(f.name)}</strong></div>
+          <div class="muted small">Modified ${formatRelative(f.modifiedTime)}</div>
+        </div>
+        <a href="${escapeAttr(f.webViewLink)}" target="_blank" rel="noopener" class="muted small">Open ↗</a>
+        <button class="ghost" data-link-sheet="${escapeAttr(f.id)}">Link</button>
+      </div>
+    `).join('');
+    wrap.querySelectorAll('[data-link-sheet]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-link-sheet');
+        btn.disabled = true;
+        try {
+          const binding = await Sheets.linkExistingSheet(id);
+          toast(`Linked: ${binding.title}`, 'ok');
+          wrap.classList.add('hidden');
+          renderSettingsBody();
+        } catch (e) {
+          toast('Link failed: ' + e.message, 'error');
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  function clearBulkImportSheet() {
+    if (!global.Sheets || !Sheets.loadLandersBinding()) return;
+    showConfirm(
+      'Clear bulk-import sheet contents?',
+      'Wipes data rows on all four tabs (Landers / Blocks / Page Views / Tiles) while keeping the headers. Also drops the local in-progress entries. Cannot be undone.',
+      async () => {
+        try {
+          await Sheets.clearBulkImportSheet();
+          if (global.LandersTool && typeof LandersTool.onBulkSheetCleared === 'function') {
+            await LandersTool.onBulkSheetCleared();
+          }
+          toast('Bulk-import sheet cleared.', 'ok');
+        } catch (e) {
+          toast('Clear failed: ' + e.message, 'error');
+        }
+        renderSettingsBody();
+      }
+    );
+  }
+
+  function disconnectBulkImportSheet() {
+    if (!global.Sheets) return;
+    showConfirm('Disconnect bulk-import sheet?', 'Removes the binding to this Sheet. The Sheet itself is untouched; the local IndexedDB shadow stays so you can re-link or export.', () => {
+      Sheets.disconnectLandersBinding();
+      toast('Disconnected.', 'ok');
+      renderSettingsBody();
+    });
   }
 
   async function connectGoogleSheets() {

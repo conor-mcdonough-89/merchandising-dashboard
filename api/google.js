@@ -6,10 +6,15 @@
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
+const DRIVE_API  = 'https://www.googleapis.com/drive/v3/files';
 
-// Scope: spreadsheets is enough for create + append. Drive metadata not needed.
+// Scopes:
+//   - spreadsheets: create, append, update, batchUpdate, values.get, values.clear
+//   - drive.metadata.readonly: list the operator's existing sheets so they
+//     can pick an old one to bind instead of creating fresh.
 export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
 
 export function getEnv() {
@@ -84,8 +89,20 @@ export async function refreshToken({ refresh_token }) {
   return res.json();
 }
 
-export async function createSpreadsheet({ access_token, title, headerRow }) {
-  // Step 1: create the spreadsheet.
+// Create a spreadsheet. Two call shapes:
+//   1. Legacy single-tab:  { title, headerRow }            -> creates "Sheet1"
+//   2. Multi-tab:          { title, worksheets: [...] }     -> one tab per spec
+//
+// worksheets entries: { name: 'Landers', headerRow: ['id', 'slug', ...] }
+//
+// Returns { sheetId, url, gid, tabs: [{ name, gid }] }. `gid` is the first
+// tab's gid (kept for backwards compat with the existing single-tab caller).
+export async function createSpreadsheet({ access_token, title, headerRow, worksheets }) {
+  const tabs = Array.isArray(worksheets) && worksheets.length
+    ? worksheets
+    : [{ name: 'Sheet1', headerRow: Array.isArray(headerRow) ? headerRow : [] }];
+
+  // Step 1: create the spreadsheet with all requested tabs.
   const createRes = await fetch(SHEETS_API, {
     method: 'POST',
     headers: {
@@ -94,7 +111,7 @@ export async function createSpreadsheet({ access_token, title, headerRow }) {
     },
     body: JSON.stringify({
       properties: { title: title || 'SidelineSwap Merch Bulk Import' },
-      sheets: [{ properties: { title: 'Sheet1' } }],
+      sheets: tabs.map((t) => ({ properties: { title: t.name } })),
     }),
   });
   if (!createRes.ok) {
@@ -106,23 +123,33 @@ export async function createSpreadsheet({ access_token, title, headerRow }) {
   const created = await createRes.json();
   const sheetId = created.spreadsheetId;
   const url = created.spreadsheetUrl;
-  // Worksheet gid -- needed by spreadsheets.batchUpdate's range.sheetId field
-  // for cell-level formatting. Sheets we create always have a single sheet so
-  // [0] is the right tab.
-  const gid = created.sheets && created.sheets[0] && created.sheets[0].properties
-    ? created.sheets[0].properties.sheetId
-    : 0;
 
-  // Step 2: write the header row.
-  if (Array.isArray(headerRow) && headerRow.length) {
-    await appendValues({ access_token, sheetId, rows: [headerRow] });
+  // Map each requested tab to the gid Google assigned (order is preserved by
+  // the API, but we look up by title to be safe).
+  const titleToGid = new Map();
+  for (const s of created.sheets || []) {
+    const p = s.properties;
+    if (p && typeof p.sheetId === 'number') titleToGid.set(p.title, p.sheetId);
+  }
+  const tabsOut = tabs.map((t) => ({
+    name: t.name,
+    gid: titleToGid.has(t.name) ? titleToGid.get(t.name) : 0,
+  }));
+  const firstGid = tabsOut[0] ? tabsOut[0].gid : 0;
+
+  // Step 2: write each tab's header row.
+  for (const t of tabs) {
+    if (Array.isArray(t.headerRow) && t.headerRow.length) {
+      await appendValues({ access_token, sheetId, rows: [t.headerRow], tab: t.name });
+    }
   }
 
-  return { sheetId, url, gid };
+  return { sheetId, url, gid: firstGid, tabs: tabsOut };
 }
 
-export async function appendValues({ access_token, sheetId, rows }) {
-  const range = encodeURIComponent('Sheet1!A1');
+export async function appendValues({ access_token, sheetId, rows, tab }) {
+  const a1 = `${tab || 'Sheet1'}!A1`;
+  const range = encodeURIComponent(a1);
   const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
   const res = await fetch(url, {
     method: 'POST',
@@ -211,10 +238,17 @@ export async function readValues({ access_token, sheetId, range }) {
 // Fetch lightweight spreadsheet metadata so the browser can recover the
 // worksheet `gid` for bindings created before we started capturing it (or
 // when the operator points the dashboard at a hand-made sheet). Returns
-// `{ gid, title }` for the FIRST tab.
-export async function getSpreadsheetMeta({ access_token, sheetId }) {
-  // fields= keeps the response small -- we only need sheet[0].properties.
-  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}?fields=sheets.properties.sheetId,sheets.properties.title`;
+// `{ gid, title, tabs: [{ name, gid }] }`. `gid` + `title` are the first
+// tab's values (kept for backwards compat with the existing single-tab
+// callers); `tabs` is the full list, used by the multi-tab bulk-import flow
+// to validate that all four required tabs exist on a linked sheet.
+export async function getSpreadsheetMeta({ access_token, sheetId, properties }) {
+  // fields= keeps the response small. Include the spreadsheet title when the
+  // caller asks for it -- needed when binding to an existing sheet so the UI
+  // can display its name.
+  const fieldList = ['sheets.properties.sheetId', 'sheets.properties.title'];
+  if (properties) fieldList.push('properties.title');
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}?fields=${encodeURIComponent(fieldList.join(','))}`;
   const res = await fetch(url, {
     method: 'GET',
     headers: { 'authorization': `Bearer ${access_token}` },
@@ -226,11 +260,67 @@ export async function getSpreadsheetMeta({ access_token, sheetId }) {
     throw err;
   }
   const data = await res.json();
-  const first = data.sheets && data.sheets[0] && data.sheets[0].properties;
-  if (!first || typeof first.sheetId !== 'number') {
-    throw new Error('Sheets meta: no sheets[0].properties.sheetId in response');
+  const tabs = (data.sheets || [])
+    .map((s) => s && s.properties)
+    .filter((p) => p && typeof p.sheetId === 'number')
+    .map((p) => ({ name: p.title || '', gid: p.sheetId }));
+  if (!tabs.length) {
+    throw new Error('Sheets meta: no sheets in response');
   }
-  return { gid: first.sheetId, title: first.title || 'Sheet1' };
+  const ssTitle = data.properties && data.properties.title || null;
+  return {
+    gid: tabs[0].gid,
+    title: tabs[0].name || 'Sheet1',
+    tabs,
+    spreadsheetTitle: ssTitle,
+  };
+}
+
+// List the operator's Google Sheets via the Drive API. Used by the "browse
+// existing sheets" picker. Requires the drive.metadata.readonly scope.
+// Returns an array of { id, name, modifiedTime, webViewLink }.
+export async function listDriveSheets({ access_token, pageSize }) {
+  const params = new URLSearchParams({
+    q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+    fields: 'files(id,name,modifiedTime,webViewLink)',
+    orderBy: 'modifiedTime desc',
+    pageSize: String(Math.min(Math.max(parseInt(pageSize, 10) || 25, 1), 100)),
+  });
+  const res = await fetch(`${DRIVE_API}?${params.toString()}`, {
+    method: 'GET',
+    headers: { 'authorization': `Bearer ${access_token}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Drive list ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  return Array.isArray(data.files) ? data.files : [];
+}
+
+// Wipe the data rows of one or more A1 ranges, preserving the headers. Used
+// by the "Clear sheet contents" button in Settings. `ranges` example:
+//   ['Landers!A2:Z', 'Blocks!A2:Z', 'Page View Block Relations!A2:Z',
+//    'Block Tile Relations!A2:Z']
+export async function batchClearValues({ access_token, sheetId, ranges }) {
+  const url = `${SHEETS_API}/${encodeURIComponent(sheetId)}/values:batchClear`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${access_token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ ranges }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Sheets clear ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
 }
 
 // -------- shared response helpers (mirror of api/anthropic.js) --------
