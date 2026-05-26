@@ -326,15 +326,20 @@ SELECT
   mv.price_current_retail,
   mv.primary_image_url
 FROM rails.model_versions AS mv
-LEFT JOIN rails.models AS m ON m.id = mv.model_id
-WHERE mv.model_id = __PARENT_MODEL_ID__
+JOIN rails.models AS m ON m.id = mv.model_id
+WHERE m.category_id = __CATEGORY_ID__
+  AND m.brand_id = __BRAND_ID__
 ORDER BY mv.inventory_flow_count DESC, mv.demand DESC
 `.trim();
 
-  async function fetchModelVersionsForParent(parentModelId) {
-    const id = parseInt(parentModelId, 10);
-    if (!Number.isFinite(id)) throw new Error(`Invalid parent model id: ${parentModelId}`);
-    const sql = MODEL_VERSIONS_SQL_TEMPLATE.replace('__PARENT_MODEL_ID__', String(id));
+  async function fetchModelVersionsForBrandCategory(categoryId, brandId) {
+    const cid = parseInt(categoryId, 10);
+    const bid = parseInt(brandId, 10);
+    if (!Number.isFinite(cid)) throw new Error(`Invalid category id: ${categoryId}`);
+    if (!Number.isFinite(bid)) throw new Error(`Invalid brand id: ${brandId}`);
+    const sql = MODEL_VERSIONS_SQL_TEMPLATE
+      .replace('__CATEGORY_ID__', String(cid))
+      .replace('__BRAND_ID__', String(bid));
     const rows = await runNativeQuery(sql);
     return rows.map((r) => ({
       id: r.id,
@@ -402,7 +407,7 @@ ORDER BY mv.inventory_flow_count DESC, mv.demand DESC
     fetchModelsForCategory,
     fetchImageryModelsForCategory,
     fetchCategoryImageryForSport,
-    fetchModelVersionsForParent,
+    fetchModelVersionsForBrandCategory,
     runNativeQuery,
     SPORTS_SQL,
     CATEGORIES_SQL,
