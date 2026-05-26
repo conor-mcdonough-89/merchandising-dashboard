@@ -676,19 +676,22 @@
 
   // -------- Model Versions tool --------
 
+  // Transient UI filter for the results table. Not persisted; resets per sync.
+  let _modelVersionsImageFilter = 'all'; // 'all' | 'with' | 'without'
+
   async function renderModelVersionsTool() {
     const main = document.getElementById('main');
     main.innerHTML = `
       <div class="imagery-tool">
         <h2>Model Versions</h2>
-        <p class="imagery-subtitle">Browse child versions of a parent model from <code>rails.model_versions</code>. Click any row to open the version in admin.</p>
+        <p class="imagery-subtitle">Browse child versions in <code>rails.model_versions</code> by brand within a category. Filter for those missing an image. Click any row to open the version in admin.</p>
         <div class="imagery-controls">
           <label for="mv-sport">Sport</label>
           <select id="mv-sport"><option value="">— pick a sport —</option></select>
           <label for="mv-category">Relatable Category</label>
           <select id="mv-category" disabled><option value="">— pick a category —</option></select>
-          <label for="mv-parent">Parent Model</label>
-          <select id="mv-parent" disabled><option value="">— pick a model —</option></select>
+          <label for="mv-brand">Brand</label>
+          <select id="mv-brand" disabled><option value="">— pick a brand —</option></select>
           <button class="primary" id="mv-sync" disabled>Sync</button>
           <span id="mv-status" class="muted small"></span>
         </div>
@@ -705,7 +708,7 @@
 
     const sportSel = document.getElementById('mv-sport');
     const catSel = document.getElementById('mv-category');
-    const parentSel = document.getElementById('mv-parent');
+    const brandSel = document.getElementById('mv-brand');
     const syncBtn = document.getElementById('mv-sync');
     const status = document.getElementById('mv-status');
 
@@ -723,8 +726,8 @@
 
     const refreshCategoryOptions = (sportId) => {
       catSel.innerHTML = '<option value="">— pick a category —</option>';
-      parentSel.innerHTML = '<option value="">— pick a model —</option>';
-      parentSel.disabled = true;
+      brandSel.innerHTML = '<option value="">— pick a brand —</option>';
+      brandSel.disabled = true;
       syncBtn.disabled = true;
       if (!sportId) { catSel.disabled = true; return; }
       const cats = _allRelatableCategories
@@ -738,33 +741,38 @@
       catSel.disabled = false;
     };
 
-    const refreshParentOptions = async (categoryId) => {
-      parentSel.innerHTML = '<option value="">— pick a model —</option>';
+    const refreshBrandOptions = async (categoryId) => {
+      brandSel.innerHTML = '<option value="">— pick a brand —</option>';
       syncBtn.disabled = true;
       status.textContent = '';
       status.style.color = '';
-      if (!categoryId) { parentSel.disabled = true; return; }
+      if (!categoryId) { brandSel.disabled = true; return; }
       const cat = await Storage.loadCategory(categoryId);
       if (!cat || !cat.models || !cat.models.length) {
-        parentSel.disabled = true;
+        brandSel.disabled = true;
         status.textContent = 'Sync this category first in Model Cleanup.';
         status.style.color = 'var(--red)';
         return;
       }
-      const models = [...cat.models].sort((a, b) => (b.sold_count || 0) - (a.sold_count || 0));
-      for (const m of models) {
-        const o = document.createElement('option');
-        o.value = m.id;
-        const sold = (m.sold_count || 0).toLocaleString();
-        o.textContent = `${m.name} (id ${m.id}, sold ${sold})`;
-        parentSel.appendChild(o);
+      // Distinct brands present in the synced category models.
+      const brandMap = new Map();
+      for (const m of cat.models) {
+        if (m.brand_id == null) continue;
+        const key = String(m.brand_id);
+        if (!brandMap.has(key)) brandMap.set(key, m.brand_name || `Brand #${m.brand_id}`);
       }
-      parentSel.disabled = false;
+      const brands = [...brandMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+      for (const [id, name] of brands) {
+        const o = document.createElement('option');
+        o.value = id; o.textContent = name;
+        brandSel.appendChild(o);
+      }
+      brandSel.disabled = false;
     };
 
     sportSel.addEventListener('change', () => refreshCategoryOptions(sportSel.value));
-    catSel.addEventListener('change', () => refreshParentOptions(catSel.value));
-    parentSel.addEventListener('change', () => { syncBtn.disabled = !parentSel.value; });
+    catSel.addEventListener('change', () => refreshBrandOptions(catSel.value));
+    brandSel.addEventListener('change', () => { syncBtn.disabled = !brandSel.value; });
 
     // Restore previous selection.
     if (_modelVersionsState && _modelVersionsState.sportId) {
@@ -772,10 +780,10 @@
       refreshCategoryOptions(_modelVersionsState.sportId);
       if (_modelVersionsState.categoryId) {
         catSel.value = _modelVersionsState.categoryId;
-        await refreshParentOptions(_modelVersionsState.categoryId);
-        if (_modelVersionsState.parentModelId) {
-          parentSel.value = String(_modelVersionsState.parentModelId);
-          syncBtn.disabled = !parentSel.value;
+        await refreshBrandOptions(_modelVersionsState.categoryId);
+        if (_modelVersionsState.brandId) {
+          brandSel.value = String(_modelVersionsState.brandId);
+          syncBtn.disabled = !brandSel.value;
         }
       }
       renderModelVersionsResults(_modelVersionsState);
@@ -784,14 +792,16 @@
     syncBtn.addEventListener('click', async () => {
       const sportId = sportSel.value;
       const categoryId = catSel.value;
-      const parentModelId = parentSel.value;
-      if (!parentModelId) return;
+      const brandId = brandSel.value;
+      const brandName = brandSel.options[brandSel.selectedIndex]?.textContent || null;
+      if (!brandId || !categoryId) return;
       syncBtn.disabled = true;
       status.textContent = 'Syncing…';
       status.style.color = '';
       try {
-        const rows = await Metabase.fetchModelVersionsForParent(parentModelId);
-        _modelVersionsState = { sportId, categoryId, parentModelId, rows, syncedAt: new Date().toISOString() };
+        const rows = await Metabase.fetchModelVersionsForBrandCategory(categoryId, brandId);
+        _modelVersionsState = { sportId, categoryId, brandId, brandName, rows, syncedAt: new Date().toISOString() };
+        _modelVersionsImageFilter = 'all';
         localStorage.setItem(MODEL_VERSIONS_STATE_KEY, JSON.stringify(_modelVersionsState));
         status.textContent = `Synced ${rows.length.toLocaleString()} version(s).`;
         renderModelVersionsResults(_modelVersionsState);
@@ -808,14 +818,32 @@
     const wrap = document.getElementById('mv-results');
     if (!wrap) return;
     if (!state || !state.rows || !state.rows.length) {
-      wrap.innerHTML = `<p class="muted small">No versions found for this parent model.</p>`;
+      wrap.innerHTML = `<p class="muted small">No versions found for this brand + category. Pick a sport, category, and brand, then click Sync.</p>`;
       return;
     }
-    const rowsHtml = state.rows.map((v) => {
-      const adminUrl = `https://admin.sidelineswap.com/admin/models/${state.parentModelId}/versions/${v.id}`;
-      const thumb = v.primary_image_url
+
+    const withCount = state.rows.filter((r) => !!r.primary_image_url).length;
+    const withoutCount = state.rows.length - withCount;
+
+    const filter = _modelVersionsImageFilter;
+    const filtered = state.rows.filter((r) => {
+      if (filter === 'with') return !!r.primary_image_url;
+      if (filter === 'without') return !r.primary_image_url;
+      return true;
+    });
+
+    const pill = (val, label, count) =>
+      `<span class="sport-pill ${filter === val ? 'active' : ''}" data-mv-filter="${val}">${label} <span class="muted small">${count.toLocaleString()}</span></span>`;
+
+    const rowsHtml = filtered.map((v) => {
+      const has = !!v.primary_image_url;
+      const adminUrl = `https://admin.sidelineswap.com/admin/models/${v.parent_model_id}/versions/${v.id}`;
+      const thumb = has
         ? `<img src="${escapeAttr(rewriteImageUrlForEdge(v.primary_image_url))}" alt="" style="width:32px;height:32px;object-fit:cover;border-radius:4px;border:1px solid var(--border);" loading="lazy">`
         : `<span class="muted small">—</span>`;
+      const bubble = has
+        ? `<span class="img-bubble has-image">Has Image</span>`
+        : `<span class="img-bubble no-image">Missing</span>`;
       const demandBadge = v.demand_code
         ? `<span class="img-bubble" style="background:var(--bg-2);color:var(--text-2);">${escapeHtml(String(v.demand_code))}</span>`
         : '';
@@ -828,23 +856,38 @@
           <td>${escapeHtml(v.name || '')} <span class="muted small">#${v.id}</span></td>
           <td>${escapeHtml(v.parent_model_name || '')} <span class="muted small">#${v.parent_model_id}</span></td>
           <td>${escapeHtml(v.sku || '')}</td>
+          <td>${bubble}</td>
           <td class="num">${v.demand == null ? '—' : v.demand} ${demandBadge}</td>
           <td class="num">${(v.inventory_flow_count || 0).toLocaleString()}</td>
           <td class="num">${price}</td>
         </tr>
       `;
     }).join('');
+
     wrap.innerHTML = `
-      <p class="muted small" style="margin-bottom:10px;">
-        ${state.rows.length.toLocaleString()} version(s) · synced ${formatRelative(state.syncedAt)}
-      </p>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        <span class="muted small">
+          ${state.rows.length.toLocaleString()} version(s) · ${escapeHtml(state.brandName || '')} · synced ${formatRelative(state.syncedAt)}
+        </span>
+        <span style="display:flex;gap:6px;">
+          ${pill('all', 'All', state.rows.length)}
+          ${pill('with', 'Has image', withCount)}
+          ${pill('without', 'Missing', withoutCount)}
+        </span>
+      </div>
       <table class="imagery-table">
         <thead>
-          <tr><th></th><th>Version</th><th>Parent Model</th><th>SKU</th><th>Demand</th><th>Inventory Flow</th><th>Retail</th></tr>
+          <tr><th></th><th>Version</th><th>Parent Model</th><th>SKU</th><th>Has Image</th><th>Demand</th><th>Inventory Flow</th><th>Retail</th></tr>
         </thead>
-        <tbody>${rowsHtml}</tbody>
+        <tbody>${rowsHtml || `<tr><td colspan="8" class="muted small" style="padding:14px;text-align:center;">No versions match this filter.</td></tr>`}</tbody>
       </table>
     `;
+    wrap.querySelectorAll('[data-mv-filter]').forEach((el) => {
+      el.addEventListener('click', () => {
+        _modelVersionsImageFilter = el.getAttribute('data-mv-filter');
+        renderModelVersionsResults(state);
+      });
+    });
     wrap.querySelectorAll('tr.clickable').forEach((tr) => {
       tr.addEventListener('click', () => window.open(tr.getAttribute('data-href'), '_blank', 'noopener'));
     });
