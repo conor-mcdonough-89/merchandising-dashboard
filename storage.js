@@ -73,8 +73,19 @@
           db.createObjectStore('model_versions_meta', { keyPath: 'key' });
         }
       };
-      req.onsuccess = () => resolve(req.result);
+      // Without this, an older connection in another tab blocks the version
+      // upgrade and `req.onsuccess` never fires -- openDB() hangs forever and
+      // the whole app sits on a blank screen. Closing on `versionchange`
+      // lets a future upgrade proceed instead of deadlocking.
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error(
+        'Database upgrade is blocked by another open tab. Close other tabs running this dashboard and reload.'
+      ));
     });
     return _dbPromise;
   }

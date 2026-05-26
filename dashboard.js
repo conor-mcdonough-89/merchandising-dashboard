@@ -206,7 +206,20 @@
   // -------- init --------
 
   async function init() {
-    await Storage.openDB();
+    try {
+      await Storage.openDB();
+    } catch (e) {
+      const main = document.getElementById('main');
+      if (main) {
+        main.innerHTML = `
+          <div class="empty-state">
+            <strong>Couldn't open local storage.</strong>
+            ${escapeHtml(e.message || String(e))}
+            <br><br>If this persists, close other tabs running this dashboard and reload.
+          </div>`;
+      }
+      return;
+    }
     await Storage.clearExpiredDecisions();
     bindGlobalHandlers();
     loadCachedSportsMeta();
