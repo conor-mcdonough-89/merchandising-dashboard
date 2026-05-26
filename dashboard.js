@@ -45,6 +45,7 @@
   const ACTIVE_TOOL_KEY = 'merch-active-tool';
   const IMAGERY_STATE_KEY = 'merch-imagery-state';
   const CATEGORY_IMAGERY_STATE_KEY = 'merch-category-imagery-state';
+  const MODEL_VERSIONS_STATE_KEY = 'merch-model-versions-state';
 
   // Which tool is currently active: 'cleanup' (default Model Cleanup),
   // 'imagery' (Model Imagery), or 'category-imagery' (Relatable Category iOS Imagery).
@@ -54,6 +55,7 @@
   // keeps the last synced view. Shape: { sportId, categoryId?, rows, syncedAt }
   let _imageryState = null;
   let _categoryImageryState = null;
+  let _modelVersionsState = null;
   // Cached relatable categories list for the imagery tool dropdowns. Fetched
   // lazily on first tool activation.
   let _allRelatableCategories = null;
@@ -209,6 +211,7 @@
     _activeTool = localStorage.getItem(ACTIVE_TOOL_KEY) || 'cleanup';
     try { _imageryState = JSON.parse(localStorage.getItem(IMAGERY_STATE_KEY) || 'null'); } catch (_) { _imageryState = null; }
     try { _categoryImageryState = JSON.parse(localStorage.getItem(CATEGORY_IMAGERY_STATE_KEY) || 'null'); } catch (_) { _categoryImageryState = null; }
+    try { _modelVersionsState = JSON.parse(localStorage.getItem(MODEL_VERSIONS_STATE_KEY) || 'null'); } catch (_) { _modelVersionsState = null; }
     await renderSportFilter();
     await refreshSheetCount();
     await renderActive();
@@ -351,6 +354,10 @@
       await renderCategoryImageryTool();
       return;
     }
+    if (_activeTool === 'model-versions') {
+      await renderModelVersionsTool();
+      return;
+    }
     if (_activeTool === 'landers') {
       await LandersTool.render();
       return;
@@ -384,7 +391,7 @@
     document.getElementById('tools-tray-backdrop').classList.add('hidden');
   }
   async function selectTool(tool) {
-    if (!['cleanup', 'imagery', 'category-imagery', 'landers'].includes(tool)) return;
+    if (!['cleanup', 'imagery', 'category-imagery', 'model-versions', 'landers'].includes(tool)) return;
     _activeTool = tool;
     localStorage.setItem(ACTIVE_TOOL_KEY, tool);
     closeToolsTray();
@@ -658,6 +665,182 @@
       <table class="imagery-table">
         <thead>
           <tr><th></th><th>Relatable Category</th><th>Mobile Image</th><th>Facet Count</th></tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+    wrap.querySelectorAll('tr.clickable').forEach((tr) => {
+      tr.addEventListener('click', () => window.open(tr.getAttribute('data-href'), '_blank', 'noopener'));
+    });
+  }
+
+  // -------- Model Versions tool --------
+
+  async function renderModelVersionsTool() {
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <div class="imagery-tool">
+        <h2>Model Versions</h2>
+        <p class="imagery-subtitle">Browse child versions of a parent model from <code>rails.model_versions</code>. Click any row to open the version in admin.</p>
+        <div class="imagery-controls">
+          <label for="mv-sport">Sport</label>
+          <select id="mv-sport"><option value="">— pick a sport —</option></select>
+          <label for="mv-category">Relatable Category</label>
+          <select id="mv-category" disabled><option value="">— pick a category —</option></select>
+          <label for="mv-parent">Parent Model</label>
+          <select id="mv-parent" disabled><option value="">— pick a model —</option></select>
+          <button class="primary" id="mv-sync" disabled>Sync</button>
+          <span id="mv-status" class="muted small"></span>
+        </div>
+        <div id="mv-results"></div>
+      </div>
+    `;
+
+    let loadingError = null;
+    try {
+      await ensureSportsAndCategoriesLoaded();
+    } catch (e) {
+      loadingError = e.message;
+    }
+
+    const sportSel = document.getElementById('mv-sport');
+    const catSel = document.getElementById('mv-category');
+    const parentSel = document.getElementById('mv-parent');
+    const syncBtn = document.getElementById('mv-sync');
+    const status = document.getElementById('mv-status');
+
+    if (loadingError) {
+      status.textContent = 'Failed to load sports: ' + loadingError;
+      status.style.color = 'var(--red)';
+      return;
+    }
+
+    for (const s of _allSports) {
+      const o = document.createElement('option');
+      o.value = s.id; o.textContent = s.name;
+      sportSel.appendChild(o);
+    }
+
+    const refreshCategoryOptions = (sportId) => {
+      catSel.innerHTML = '<option value="">— pick a category —</option>';
+      parentSel.innerHTML = '<option value="">— pick a model —</option>';
+      parentSel.disabled = true;
+      syncBtn.disabled = true;
+      if (!sportId) { catSel.disabled = true; return; }
+      const cats = _allRelatableCategories
+        .filter((c) => String(c.sportId) === String(sportId))
+        .sort((a, b) => (a.fullName || a.name).localeCompare(b.fullName || b.name));
+      for (const c of cats) {
+        const o = document.createElement('option');
+        o.value = c.id; o.textContent = c.fullName || c.name;
+        catSel.appendChild(o);
+      }
+      catSel.disabled = false;
+    };
+
+    const refreshParentOptions = async (categoryId) => {
+      parentSel.innerHTML = '<option value="">— pick a model —</option>';
+      syncBtn.disabled = true;
+      status.textContent = '';
+      status.style.color = '';
+      if (!categoryId) { parentSel.disabled = true; return; }
+      const cat = await Storage.loadCategory(categoryId);
+      if (!cat || !cat.models || !cat.models.length) {
+        parentSel.disabled = true;
+        status.textContent = 'Sync this category first in Model Cleanup.';
+        status.style.color = 'var(--red)';
+        return;
+      }
+      const models = [...cat.models].sort((a, b) => (b.sold_count || 0) - (a.sold_count || 0));
+      for (const m of models) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        const sold = (m.sold_count || 0).toLocaleString();
+        o.textContent = `${m.name} (id ${m.id}, sold ${sold})`;
+        parentSel.appendChild(o);
+      }
+      parentSel.disabled = false;
+    };
+
+    sportSel.addEventListener('change', () => refreshCategoryOptions(sportSel.value));
+    catSel.addEventListener('change', () => refreshParentOptions(catSel.value));
+    parentSel.addEventListener('change', () => { syncBtn.disabled = !parentSel.value; });
+
+    // Restore previous selection.
+    if (_modelVersionsState && _modelVersionsState.sportId) {
+      sportSel.value = _modelVersionsState.sportId;
+      refreshCategoryOptions(_modelVersionsState.sportId);
+      if (_modelVersionsState.categoryId) {
+        catSel.value = _modelVersionsState.categoryId;
+        await refreshParentOptions(_modelVersionsState.categoryId);
+        if (_modelVersionsState.parentModelId) {
+          parentSel.value = String(_modelVersionsState.parentModelId);
+          syncBtn.disabled = !parentSel.value;
+        }
+      }
+      renderModelVersionsResults(_modelVersionsState);
+    }
+
+    syncBtn.addEventListener('click', async () => {
+      const sportId = sportSel.value;
+      const categoryId = catSel.value;
+      const parentModelId = parentSel.value;
+      if (!parentModelId) return;
+      syncBtn.disabled = true;
+      status.textContent = 'Syncing…';
+      status.style.color = '';
+      try {
+        const rows = await Metabase.fetchModelVersionsForParent(parentModelId);
+        _modelVersionsState = { sportId, categoryId, parentModelId, rows, syncedAt: new Date().toISOString() };
+        localStorage.setItem(MODEL_VERSIONS_STATE_KEY, JSON.stringify(_modelVersionsState));
+        status.textContent = `Synced ${rows.length.toLocaleString()} version(s).`;
+        renderModelVersionsResults(_modelVersionsState);
+      } catch (e) {
+        status.textContent = 'Sync failed: ' + e.message;
+        status.style.color = 'var(--red)';
+      } finally {
+        syncBtn.disabled = false;
+      }
+    });
+  }
+
+  function renderModelVersionsResults(state) {
+    const wrap = document.getElementById('mv-results');
+    if (!wrap) return;
+    if (!state || !state.rows || !state.rows.length) {
+      wrap.innerHTML = `<p class="muted small">No versions found for this parent model.</p>`;
+      return;
+    }
+    const rowsHtml = state.rows.map((v) => {
+      const adminUrl = `https://admin.sidelineswap.com/admin/models/${state.parentModelId}/versions/${v.id}`;
+      const thumb = v.primary_image_url
+        ? `<img src="${escapeAttr(rewriteImageUrlForEdge(v.primary_image_url))}" alt="" style="width:32px;height:32px;object-fit:cover;border-radius:4px;border:1px solid var(--border);" loading="lazy">`
+        : `<span class="muted small">—</span>`;
+      const demandBadge = v.demand_code
+        ? `<span class="img-bubble" style="background:var(--bg-2);color:var(--text-2);">${escapeHtml(String(v.demand_code))}</span>`
+        : '';
+      const price = (v.price_current_retail == null || v.price_current_retail === '')
+        ? '—'
+        : `$${Number(v.price_current_retail).toFixed(2)}`;
+      return `
+        <tr class="clickable" data-href="${escapeAttr(adminUrl)}">
+          <td>${thumb}</td>
+          <td>${escapeHtml(v.name || '')} <span class="muted small">#${v.id}</span></td>
+          <td>${escapeHtml(v.parent_model_name || '')} <span class="muted small">#${v.parent_model_id}</span></td>
+          <td>${escapeHtml(v.sku || '')}</td>
+          <td class="num">${v.demand == null ? '—' : v.demand} ${demandBadge}</td>
+          <td class="num">${(v.inventory_flow_count || 0).toLocaleString()}</td>
+          <td class="num">${price}</td>
+        </tr>
+      `;
+    }).join('');
+    wrap.innerHTML = `
+      <p class="muted small" style="margin-bottom:10px;">
+        ${state.rows.length.toLocaleString()} version(s) · synced ${formatRelative(state.syncedAt)}
+      </p>
+      <table class="imagery-table">
+        <thead>
+          <tr><th></th><th>Version</th><th>Parent Model</th><th>SKU</th><th>Demand</th><th>Inventory Flow</th><th>Retail</th></tr>
         </thead>
         <tbody>${rowsHtml}</tbody>
       </table>
