@@ -313,6 +313,43 @@ ORDER BY position
     }));
   }
 
+  const MODEL_VERSIONS_SQL_TEMPLATE = `
+SELECT
+  mv.id,
+  mv.name,
+  mv.model_id AS parent_model_id,
+  m.name      AS parent_model_name,
+  mv.sku,
+  mv.demand,
+  mv.demand_code,
+  mv.inventory_flow_count,
+  mv.price_current_retail,
+  mv.primary_image_url
+FROM rails.model_versions AS mv
+LEFT JOIN rails.models AS m ON m.id = mv.model_id
+WHERE mv.model_id = __PARENT_MODEL_ID__
+ORDER BY mv.inventory_flow_count DESC, mv.demand DESC
+`.trim();
+
+  async function fetchModelVersionsForParent(parentModelId) {
+    const id = parseInt(parentModelId, 10);
+    if (!Number.isFinite(id)) throw new Error(`Invalid parent model id: ${parentModelId}`);
+    const sql = MODEL_VERSIONS_SQL_TEMPLATE.replace('__PARENT_MODEL_ID__', String(id));
+    const rows = await runNativeQuery(sql);
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      parent_model_id: r.parent_model_id,
+      parent_model_name: r.parent_model_name,
+      sku: r.sku,
+      demand: r.demand,
+      demand_code: r.demand_code,
+      inventory_flow_count: r.inventory_flow_count || 0,
+      price_current_retail: r.price_current_retail,
+      primary_image_url: r.primary_image_url,
+    }));
+  }
+
   async function fetchModelsForCategory(categoryId) {
     const id = parseInt(categoryId, 10);
     if (!Number.isFinite(id)) {
@@ -365,6 +402,7 @@ ORDER BY position
     fetchModelsForCategory,
     fetchImageryModelsForCategory,
     fetchCategoryImageryForSport,
+    fetchModelVersionsForParent,
     runNativeQuery,
     SPORTS_SQL,
     CATEGORIES_SQL,
