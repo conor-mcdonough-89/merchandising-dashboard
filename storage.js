@@ -18,7 +18,7 @@
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const REJECTION_TTL_DAYS = 30;
 
   let _dbPromise = null;
@@ -62,6 +62,15 @@
         }
         if (!db.objectStoreNames.contains('landers_meta')) {
           db.createObjectStore('landers_meta', { keyPath: 'key' });
+        }
+        // v3 -> v4: model_versions tool cache. Rows can run into the tens of
+        // thousands for a whole category sync -- too large for localStorage.
+        if (!db.objectStoreNames.contains('model_versions')) {
+          const s = db.createObjectStore('model_versions', { keyPath: 'id' });
+          s.createIndex('parent_model_id', 'parent_model_id', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('model_versions_meta')) {
+          db.createObjectStore('model_versions_meta', { keyPath: 'key' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -314,6 +323,39 @@
     return promisify(store.get('singleton'));
   }
 
+  // -------- model versions (Model Versions tool cache) --------
+  // Replaces the whole store on each sync so stale rows from a prior
+  // brand/category selection don't linger. Meta is a singleton record holding
+  // the last selection + syncedAt so a refresh can restore the view.
+  async function putModelVersions(rows) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction('model_versions', 'readwrite');
+      const store = t.objectStore('model_versions');
+      store.clear();
+      for (const r of (rows || [])) store.put(r);
+      t.oncomplete = () => resolve((rows || []).length);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
+  }
+  async function listModelVersions() {
+    const store = await tx('model_versions', 'readonly');
+    return promisify(store.getAll());
+  }
+  async function clearModelVersions() {
+    const store = await tx('model_versions', 'readwrite');
+    return promisify(store.clear());
+  }
+  async function saveModelVersionsMeta(meta) {
+    const store = await tx('model_versions_meta', 'readwrite');
+    return promisify(store.put({ key: 'singleton', ...meta }));
+  }
+  async function loadModelVersionsMeta() {
+    const store = await tx('model_versions_meta', 'readonly');
+    return promisify(store.get('singleton'));
+  }
+
   global.Storage = {
     openDB,
     saveCategory, loadCategory, listCategories, deleteCategory,
@@ -323,5 +365,7 @@
     recordDecision, getRejections, clearExpiredDecisions, clearRejectionsForSourceIds,
     addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
     putLanders, listLanders, clearLanders, saveLandersMeta, loadLandersMeta,
+    putModelVersions, listModelVersions, clearModelVersions,
+    saveModelVersionsMeta, loadModelVersionsMeta,
   };
 })(window);

@@ -338,39 +338,57 @@ ORDER BY brand_name
     return rows.map((r) => ({ id: String(r.brand_id), name: r.brand_name }));
   }
 
-  const MODEL_VERSIONS_SQL_TEMPLATE = `
-SELECT
-  mv.id,
-  mv.name,
-  mv.model_id AS parent_model_id,
-  m.name      AS parent_model_name,
-  mv.sku,
-  mv.demand,
-  mv.demand_code,
-  mv.inventory_flow_count,
-  mv.price_current_retail,
-  mv.primary_image_url
-FROM rails.model_versions AS mv
-JOIN rails.models AS m ON m.id = mv.model_id
-WHERE m.category_id = __CATEGORY_ID__
-  AND m.brand_id = __BRAND_ID__
-ORDER BY mv.inventory_flow_count DESC, mv.demand DESC
-`.trim();
+  // Brand filter is optional: omit brandId to pull every version in the
+  // category (all brands). The parent model's brand_name is projected so the
+  // results table can group/filter by brand client-side.
+  function buildModelVersionsSql(categoryId, brandId) {
+    const lines = [
+      'SELECT',
+      '  mv.id,',
+      '  mv.name,',
+      '  mv.model_id AS parent_model_id,',
+      '  m.name      AS parent_model_name,',
+      '  m.brand_id  AS brand_id,',
+      '  b.name      AS brand_name,',
+      '  mv.sku,',
+      '  mv.demand,',
+      '  mv.demand_code,',
+      '  mv.inventory_flow_count,',
+      '  mv.price_current_retail,',
+      '  mv.primary_image_url',
+      'FROM rails.model_versions AS mv',
+      'JOIN rails.models AS m ON m.id = mv.model_id',
+      'LEFT JOIN (',
+      '  SELECT detail_id, name FROM (',
+      '    SELECT detail_id, name,',
+      '      ROW_NUMBER() OVER (PARTITION BY detail_id ORDER BY id ASC) AS rn',
+      '    FROM rails.brands',
+      '  ) WHERE rn = 1',
+      ') AS b ON b.detail_id = m.brand_id',
+      `WHERE m.category_id = ${categoryId}`,
+    ];
+    if (brandId != null) lines.push(`  AND m.brand_id = ${brandId}`);
+    lines.push('ORDER BY mv.inventory_flow_count DESC, mv.demand DESC');
+    return lines.join('\n');
+  }
 
   async function fetchModelVersionsForBrandCategory(categoryId, brandId) {
     const cid = parseInt(categoryId, 10);
-    const bid = parseInt(brandId, 10);
     if (!Number.isFinite(cid)) throw new Error(`Invalid category id: ${categoryId}`);
-    if (!Number.isFinite(bid)) throw new Error(`Invalid brand id: ${brandId}`);
-    const sql = MODEL_VERSIONS_SQL_TEMPLATE
-      .replace('__CATEGORY_ID__', String(cid))
-      .replace('__BRAND_ID__', String(bid));
+    let bid = null;
+    if (brandId != null && brandId !== '') {
+      bid = parseInt(brandId, 10);
+      if (!Number.isFinite(bid)) throw new Error(`Invalid brand id: ${brandId}`);
+    }
+    const sql = buildModelVersionsSql(cid, bid);
     const rows = await runNativeQuery(sql);
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
       parent_model_id: r.parent_model_id,
       parent_model_name: r.parent_model_name,
+      brand_id: r.brand_id,
+      brand_name: r.brand_name,
       sku: r.sku,
       demand: r.demand,
       demand_code: r.demand_code,
