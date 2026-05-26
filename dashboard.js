@@ -747,27 +747,21 @@
       status.textContent = '';
       status.style.color = '';
       if (!categoryId) { brandSel.disabled = true; return; }
-      const cat = await Storage.loadCategory(categoryId);
-      if (!cat || !cat.models || !cat.models.length) {
-        brandSel.disabled = true;
-        status.textContent = 'Sync this category first in Model Cleanup.';
+      brandSel.disabled = true;
+      status.textContent = 'Loading brands…';
+      try {
+        const brands = await Metabase.fetchBrandsForCategory(categoryId);
+        for (const b of brands) {
+          const o = document.createElement('option');
+          o.value = b.id; o.textContent = b.name;
+          brandSel.appendChild(o);
+        }
+        brandSel.disabled = brands.length === 0;
+        status.textContent = brands.length ? '' : 'No brands found for this category.';
+      } catch (e) {
+        status.textContent = 'Failed to load brands: ' + e.message;
         status.style.color = 'var(--red)';
-        return;
       }
-      // Distinct brands present in the synced category models.
-      const brandMap = new Map();
-      for (const m of cat.models) {
-        if (m.brand_id == null) continue;
-        const key = String(m.brand_id);
-        if (!brandMap.has(key)) brandMap.set(key, m.brand_name || `Brand #${m.brand_id}`);
-      }
-      const brands = [...brandMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-      for (const [id, name] of brands) {
-        const o = document.createElement('option');
-        o.value = id; o.textContent = name;
-        brandSel.appendChild(o);
-      }
-      brandSel.disabled = false;
     };
 
     sportSel.addEventListener('change', () => refreshCategoryOptions(sportSel.value));
