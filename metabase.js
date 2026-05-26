@@ -313,6 +313,31 @@ ORDER BY position
     }));
   }
 
+  const BRANDS_FOR_CATEGORY_SQL_TEMPLATE = `
+SELECT DISTINCT
+  m.brand_id,
+  b.name AS brand_name
+FROM rails.models AS m
+JOIN (
+  SELECT detail_id, name FROM (
+    SELECT detail_id, name,
+      ROW_NUMBER() OVER (PARTITION BY detail_id ORDER BY id ASC) AS rn
+    FROM rails.brands
+  ) WHERE rn = 1
+) AS b ON b.detail_id = m.brand_id
+WHERE m.category_id = __CATEGORY_ID__
+  AND m.brand_id IS NOT NULL
+ORDER BY brand_name
+`.trim();
+
+  async function fetchBrandsForCategory(categoryId) {
+    const id = parseInt(categoryId, 10);
+    if (!Number.isFinite(id)) throw new Error(`Invalid category id: ${categoryId}`);
+    const sql = BRANDS_FOR_CATEGORY_SQL_TEMPLATE.replace('__CATEGORY_ID__', String(id));
+    const rows = await runNativeQuery(sql);
+    return rows.map((r) => ({ id: String(r.brand_id), name: r.brand_name }));
+  }
+
   const MODEL_VERSIONS_SQL_TEMPLATE = `
 SELECT
   mv.id,
@@ -407,6 +432,7 @@ ORDER BY mv.inventory_flow_count DESC, mv.demand DESC
     fetchModelsForCategory,
     fetchImageryModelsForCategory,
     fetchCategoryImageryForSport,
+    fetchBrandsForCategory,
     fetchModelVersionsForBrandCategory,
     runNativeQuery,
     SPORTS_SQL,
