@@ -1388,6 +1388,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .state-tag.state-available { color: #2f8a5b; border-color: #2f8a5b; background: rgba(54,179,126,0.1); }
 .state-tag.state-redirect { color: var(--accent2); border-color: var(--accent2); background: rgba(37,99,212,0.1); }
 .state-tag.state-removed { color: var(--red); border-color: var(--red); background: rgba(212,68,94,0.1); }
+.state-tag.lf-merged-tag { color: var(--accent); border-color: var(--accent); background: rgba(184,138,20,0.12); }
+.landers-table td .state-tag + .state-tag { margin-left: 4px; }
 
 .lander-detail {
   margin-top: 18px;
