@@ -25,6 +25,7 @@ Allowed operators:
 - Block column filters use op = "equals" | "contains" over one of: ${BLOCK_COLUMNS.join(', ')}.
 - Numeric op for available_count and tile_count: one of ${NUM_OPS.join(', ')}. If "between", value must be [lo, hi].
 - has_page_view and has_block are tri-state: "has" | "none" | "any". "any" means no constraint.
+- linked: filters by the status of the category/model the lander is the primary lander for (joined via primary_lander_id). One of: "any" (no constraint) | "cat_removed" (linked category is removed) | "model_removed" (linked model is removed) | "model_merged" (linked model is merged into another) | "any_flag" (any of the three).
 
 Return JSON only matching this exact shape (use null for any unset field):
 {
@@ -36,7 +37,8 @@ Return JSON only matching this exact shape (use null for any unset field):
     "state": <"available"|"redirect"|"removed"|"draft"|null>,
     "discoverable": <true|false|null>,
     "available_count": { "op": ">|<|>=|<=|=|between", "value": <number or [lo,hi]> } | null,
-    "has_page_view": "has" | "none" | null
+    "has_page_view": "has" | "none" | null,
+    "linked": "cat_removed" | "model_removed" | "model_merged" | "any_flag" | null
   },
   "block": {
     "enabled": <boolean>,
@@ -83,6 +85,13 @@ Discoverability:
 - "discoverable", "surfaced in nav", "in site search" → discoverable = true.
 - "hidden", "not discoverable", "not in nav" → discoverable = false.
 
+Linked category/model status (the entity the lander is the PRIMARY lander for — distinct from the lander's own state). Map to filters.linked:
+- "linked model is removed", "model is removed", "removed model", "model behind it is removed", "whose model was removed" → linked = "model_removed".
+- "linked model is merged", "model is merged", "merged model", "model was folded/merged into another" → linked = "model_merged".
+- "linked category is removed", "category is removed", "removed category", "dead category" → linked = "cat_removed".
+- "linked entity removed or merged", "stale links", "orphaned landers", "broken model/category" → linked = "any_flag".
+IMPORTANT: "the lander is removed / removed landers" refers to the lander's OWN state (state="removed"), NOT linked. Only use filters.linked when the operator clearly refers to the linked model or category.
+
 Block layout vocabulary (block.column = "layout", block.op = "equals", block.value = …):
 - "top models", "popular models", "models carousel", "popular model carousel" → "top-models".
 - "results", "listings grid", "search results grid" → "results".
@@ -109,7 +118,10 @@ Examples:
 - "Find me available golf landers with buying guide blocks" → filters.slug_contains="golf", filters.state="available", block.enabled=true, block.column="layout", block.op="equals", block.value="buying-guide".
 - "Live hockey-stick category pages with a featured-categories header" → filters.slug_contains="hockey-sticks", filters.state="available", block.column="layout", block.op="equals", block.value="lander-featured-categories".
 - "Draft model landers with no blocks" → filters.query_contains="model", filters.state="draft", has_block="none".
-- "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".`;
+- "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".
+- "Find me golf model landers where the linked model is removed" → filters.slug_contains="golf", filters.query_contains="model", filters.linked="model_removed".
+- "lacrosse landers whose linked category was removed" → filters.slug_contains="lacrosse", filters.linked="cat_removed".
+- "landers pointing at a merged model" → filters.linked="model_merged".`;
 
 function clamp(value, allowed) {
   return allowed.includes(value) ? value : null;
@@ -142,6 +154,7 @@ function sanitize(parsed) {
     discoverable: f.discoverable === true || f.discoverable === false ? f.discoverable : null,
     available_count: sanitizeNumPred(f.available_count),
     has_page_view: clamp(f.has_page_view, ['has', 'none']),
+    linked: clamp(f.linked, ['cat_removed', 'model_removed', 'model_merged', 'any_flag']),
   };
   const block = {
     enabled: !!b.enabled,
