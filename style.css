@@ -1349,6 +1349,29 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .landers-table tr.clickable:hover { background: var(--surface2); }
 .landers-table td.num { font-family: 'DM Mono', monospace; text-align: right; }
 .landers-table code { font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text); }
+.landers-table .lf-check-col { width: 28px; text-align: center; padding-left: 8px; padding-right: 8px; }
+.landers-table tr.lf-queued { border-left: 3px solid var(--accent); background: #fffbe9; }
+.lf-diff {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--accent);
+}
+.lf-diff strong { font-weight: 600; }
+
+.landers-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  margin: 8px 0;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.landers-action-bar .spacer { flex: 1; }
+.landers-action-bar button.small { padding: 5px 10px; font-size: 12px; }
 
 .state-tag {
   display: inline-block;
