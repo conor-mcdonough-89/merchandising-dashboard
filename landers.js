@@ -772,6 +772,13 @@ WHERE l.id IN (__IDS__)
     if (ac) parts.push(ac);
     if (f.has_page_view === 'has') parts.push('has page_view');
     if (f.has_page_view === 'none') parts.push('no page_view');
+    const linkedLabels = {
+      cat_removed: 'linked category removed',
+      model_removed: 'linked model removed',
+      model_merged: 'linked model merged',
+      any_flag: 'linked removed/merged',
+    };
+    if (f.linked && linkedLabels[f.linked]) parts.push(linkedLabels[f.linked]);
     const b = spec.block || {};
     if (b.enabled) {
       parts.push(`block.${b.column} ${b.op} "${b.value}"`);
@@ -797,6 +804,7 @@ WHERE l.id IN (__IDS__)
     else _state.filters.discoverable = 'all';
     _state.filters.available_count = f.available_count || null;
     _state.filters.has_page_view = f.has_page_view || 'any';
+    _state.filters.linked = f.linked || 'any';
 
     const b = spec.block || {};
     _state.block.enabled = !!b.enabled;
@@ -849,6 +857,7 @@ WHERE l.id IN (__IDS__)
     set('lf-type', _state.filters.type);
     set('lf-state', _state.filters.state);
     set('lf-discoverable', _state.filters.discoverable);
+    set('lf-linked', _state.filters.linked || 'any');
     const be = document.getElementById('lf-block-enabled');
     if (be) be.checked = _state.block.enabled;
     set('lf-block-col', _state.block.column);
