@@ -189,6 +189,12 @@
     return !!(t && (t.access_token || t.refresh_token));
   }
 
+  // Drop a single sheet binding without touching Google auth, so the caller can
+  // bind a fresh sheet. The spreadsheet in Google is left untouched.
+  function unbindSheet(bindingKey) {
+    saveBinding(null, bindingKey);
+  }
+
   function disconnect() {
     saveTokens(null);
     saveBinding(null);
@@ -419,6 +425,7 @@
   global.Sheets = {
     startAuth,
     disconnect,
+    unbindSheet,
     isConnected,
     loadBinding,
     createSheet,

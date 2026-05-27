@@ -310,7 +310,8 @@
   // -------- landers (lander query tool cache) --------
   // Record shape (light projection — query/display fields only):
   // { id, slug, name, title_tag, query, type, state, discoverable,
-  //   available_count, page_view_id, redirect_target_id }
+  //   available_count, page_view_id, redirect_target_id,
+  //   cat_removed, model_removed, model_merged }   // linked-status flags (0/1)
   async function putLanders(rows) {
     if (!rows || !rows.length) return 0;
     const db = await openDB();

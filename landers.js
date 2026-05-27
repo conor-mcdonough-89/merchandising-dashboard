@@ -122,6 +122,25 @@ WHERE at.block_id IN (__BLOCK_IDS__)
 ORDER BY at.block_id, at.position ASC
 `.trim();
 
+  // Landers whose linked category is removed. Categories join to landers via
+  // categories.primary_lander_id; there is no state column, so available = 0
+  // (INT64 boolean) is "removed".
+  const LANDER_REMOVED_CATEGORIES_SQL = `
+SELECT c.primary_lander_id AS lander_id
+FROM rails.categories AS c
+WHERE c.primary_lander_id IS NOT NULL AND c.available = 0
+`.trim();
+
+  // Landers whose linked model is removed or merged. Models join via
+  // models.primary_lander_id. Only "interesting" rows are returned so the
+  // result stays small. A non-null merge_target_id (or state='merged') = merged.
+  const LANDER_MODEL_STATUS_SQL = `
+SELECT m.primary_lander_id AS lander_id, m.state AS state, m.merge_target_id AS merge_target_id
+FROM rails.models AS m
+WHERE m.primary_lander_id IS NOT NULL
+  AND (m.state = 'removed' OR m.state = 'merged' OR m.merge_target_id IS NOT NULL)
+`.trim();
+
   // Full template-column projection for a set of selected lander ids. Ids are
   // integers from our own cache; we coerce + validate to integers before
   // interpolation (same defense-in-depth as the block predicate — no template
@@ -233,19 +252,57 @@ WHERE l.id IN (__IDS__)
       available_count: r.available_count == null ? 0 : Number(r.available_count),
       page_view_id: r.page_view_id == null ? null : Number(r.page_view_id),
       redirect_target_id: r.redirect_target_id == null ? null : Number(r.redirect_target_id),
+      // Linked category/model status (joined via primary_lander_id at sync).
+      cat_removed: 0,
+      model_removed: 0,
+      model_merged: 0,
     };
+  }
+
+  // Fetch the removed-category and removed/merged-model sets keyed by the
+  // lander each is the primary for. Merged wins over removed for a model.
+  async function fetchLinkedStatus(onProgress) {
+    if (onProgress) onProgress('Checking linked categories…');
+    const catRows = await Metabase.runNativeQuery(LANDER_REMOVED_CATEGORIES_SQL);
+    const catRemoved = new Set(catRows.map((r) => Number(r.lander_id)));
+    if (onProgress) onProgress('Checking linked models…');
+    const modelRows = await Metabase.runNativeQuery(LANDER_MODEL_STATUS_SQL);
+    const modelRemoved = new Set();
+    const modelMerged = new Set();
+    for (const m of modelRows) {
+      const id = Number(m.lander_id);
+      const state = (m.state == null ? '' : String(m.state));
+      const mergeId = m.merge_target_id;
+      const merged = state === 'merged' || (mergeId != null && mergeId !== '');
+      if (merged) modelMerged.add(id);
+      else if (state === 'removed') modelRemoved.add(id);
+    }
+    return { catRemoved, modelRemoved, modelMerged };
   }
 
   async function syncAllLanders(states, onProgress) {
     const sql = LANDERS_LIST_SQL_TEMPLATE.replace('__STATE_FILTER__', buildStateFilter(states));
     if (onProgress) onProgress('Querying Metabase…');
     const rows = await Metabase.runNativeQuery(sql);
+    // Linked category/model status is best-effort: if these joins fail, landers
+    // still sync without the badges/filter.
+    let status = { catRemoved: new Set(), modelRemoved: new Set(), modelMerged: new Set() };
+    try {
+      status = await fetchLinkedStatus(onProgress);
+    } catch (_) { /* badges simply won't show */ }
     if (onProgress) onProgress(`Saving ${rows.length.toLocaleString()} landers to IndexedDB…`);
     await Storage.clearLanders();
     // Chunked writes keep individual transactions small.
     const CHUNK = 5000;
     for (let i = 0; i < rows.length; i += CHUNK) {
-      const slice = rows.slice(i, i + CHUNK).map(normalizeLander);
+      const slice = rows.slice(i, i + CHUNK).map((r) => {
+        const l = normalizeLander(r);
+        const id = Number(l.id);
+        l.cat_removed = status.catRemoved.has(id) ? 1 : 0;
+        l.model_removed = status.modelRemoved.has(id) ? 1 : 0;
+        l.model_merged = status.modelMerged.has(id) ? 1 : 0;
+        return l;
+      });
       await Storage.putLanders(slice);
       if (onProgress) onProgress(`Saved ${Math.min(i + CHUNK, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}…`);
     }
@@ -319,6 +376,7 @@ WHERE l.id IN (__IDS__)
       slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
       available_count: null, // { op, value } or null
       has_page_view: 'any',  // 'any' | 'has' | 'none'
+      linked: 'any',         // 'any' | 'cat_removed' | 'model_removed' | 'model_merged' | 'any_flag'
     },
     block: { enabled: false, column: 'layout', op: 'equals', value: '', tile_count: null },
     has_block: 'any', // 'any' | 'has' | 'none'
@@ -540,6 +598,13 @@ WHERE l.id IN (__IDS__)
             <option value="1"${f.discoverable === '1' ? ' selected' : ''}>Discoverable only</option>
             <option value="0"${f.discoverable === '0' ? ' selected' : ''}>Undiscoverable only</option>
           </select>
+          <select id="lf-linked" title="Filter by the linked category/model status (joined via primary_lander_id)">
+            <option value="any"${f.linked === 'any' ? ' selected' : ''}>Linked: any</option>
+            <option value="any_flag"${f.linked === 'any_flag' ? ' selected' : ''}>Any removed/merged</option>
+            <option value="cat_removed"${f.linked === 'cat_removed' ? ' selected' : ''}>Category removed</option>
+            <option value="model_removed"${f.linked === 'model_removed' ? ' selected' : ''}>Model removed</option>
+            <option value="model_merged"${f.linked === 'model_merged' ? ' selected' : ''}>Model merged</option>
+          </select>
         </div>
         <div class="landers-filter-row">
           <label class="row-flex" style="gap:6px;cursor:pointer;">
@@ -589,7 +654,7 @@ WHERE l.id IN (__IDS__)
         debouncedRender();
       });
     });
-    ['lf-type', 'lf-state', 'lf-discoverable'].forEach((id) => {
+    ['lf-type', 'lf-state', 'lf-discoverable', 'lf-linked'].forEach((id) => {
       document.getElementById(id).addEventListener('change', (e) => {
         const key = id.replace('lf-', '');
         _state.filters[key] = e.target.value;
@@ -613,7 +678,7 @@ WHERE l.id IN (__IDS__)
     document.getElementById('lf-clear').addEventListener('click', () => {
       _state.filters = {
         slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
-        available_count: null, has_page_view: 'any',
+        available_count: null, has_page_view: 'any', linked: 'any',
       };
       _state.block = { enabled: false, column: 'layout', op: 'equals', value: '', tile_count: null };
       _state.has_block = 'any';
@@ -833,6 +898,12 @@ WHERE l.id IN (__IDS__)
       if (!numericMatches(f.available_count, Number(l.available_count || 0))) continue;
       if (f.has_page_view === 'has' && l.page_view_id == null) continue;
       if (f.has_page_view === 'none' && l.page_view_id != null) continue;
+      if (f.linked && f.linked !== 'any') {
+        if (f.linked === 'cat_removed' && !l.cat_removed) continue;
+        else if (f.linked === 'model_removed' && !l.model_removed) continue;
+        else if (f.linked === 'model_merged' && !l.model_merged) continue;
+        else if (f.linked === 'any_flag' && !(l.cat_removed || l.model_removed || l.model_merged)) continue;
+      }
       if (_state.block.enabled && _blockIdSet && !_blockIdSet.has(Number(l.id))) continue;
       if (_state.has_block === 'has' && _hasBlockIdSet && !_hasBlockIdSet.has(Number(l.id))) continue;
       if (_state.has_block === 'none' && _hasBlockIdSet && _hasBlockIdSet.has(Number(l.id))) continue;
@@ -890,6 +961,7 @@ WHERE l.id IN (__IDS__)
             ${th('available_count', 'Avail.')}
             <th>PV</th>
             <th>Redirect</th>
+            <th>Linked</th>
             <th>Admin</th>
           </tr>
         </thead>
@@ -953,6 +1025,7 @@ WHERE l.id IN (__IDS__)
         <div class="spacer"></div>
         <span class="muted small" id="lf-sheet-status">${sheetStatus}</span>
         <button class="ghost small" id="lf-create-sheet"${connected ? '' : ' disabled'}>${binding ? 'New Landers Sheet' : 'Create Landers Sheet'}</button>
+        ${binding ? '<button class="ghost small" id="lf-disconnect-sheet">Disconnect sheet</button>' : ''}
         <button class="primary small" id="lf-action"${_selectedLanderIds.size ? '' : ' disabled'}>Action…</button>
         ${queued ? `<button class="ghost small" id="lf-download-csv">Download CSV (${queued.toLocaleString()})</button>` : ''}
       </div>
@@ -975,6 +1048,8 @@ WHERE l.id IN (__IDS__)
     if (clearBtn) clearBtn.addEventListener('click', () => selectAllMatches(false));
     const createBtn = document.getElementById('lf-create-sheet');
     if (createBtn) createBtn.addEventListener('click', createLanderSheet);
+    const disconnectBtn = document.getElementById('lf-disconnect-sheet');
+    if (disconnectBtn) disconnectBtn.addEventListener('click', disconnectLanderSheet);
     const actionBtn = document.getElementById('lf-action');
     if (actionBtn) actionBtn.addEventListener('click', openLanderActionModal);
     const csvBtn = document.getElementById('lf-download-csv');
@@ -1013,6 +1088,12 @@ WHERE l.id IN (__IDS__)
     } catch (e) {
       landerToast('Create failed: ' + e.message, 'error');
     }
+    renderResults();
+  }
+
+  function disconnectLanderSheet() {
+    if (global.Sheets && Sheets.unbindSheet) Sheets.unbindSheet(LANDERS_BINDING_KEY);
+    landerToast('Landers sheet unbound — create or link a new one. The sheet in Google is untouched.', 'ok');
     renderResults();
   }
 
@@ -1168,9 +1249,18 @@ WHERE l.id IN (__IDS__)
         <td class="num">${(l.available_count || 0).toLocaleString()}</td>
         <td>${l.page_view_id ? `<a href="${escapeAttr(pvUrl)}" target="_blank" rel="noopener">${l.page_view_id}</a>` : '—'}</td>
         <td>${l.redirect_target_id ? `<a href="${escapeAttr(rdUrl)}" target="_blank" rel="noopener">${l.redirect_target_id}</a>` : '—'}</td>
+        <td>${linkedBadges(l) || '—'}</td>
         <td><a href="${escapeAttr(lUrl)}" target="_blank" rel="noopener">Open ↗</a></td>
       </tr>
     `;
+  }
+
+  function linkedBadges(l) {
+    const out = [];
+    if (l.cat_removed) out.push('<span class="state-tag state-removed">cat removed</span>');
+    if (l.model_removed) out.push('<span class="state-tag state-removed">model removed</span>');
+    if (l.model_merged) out.push('<span class="state-tag lf-merged-tag">model merged</span>');
+    return out.join(' ');
   }
 
   async function openLanderDetail(landerId) {
@@ -1189,6 +1279,7 @@ WHERE l.id IN (__IDS__)
         ${lander.redirect_target_id ? `· redirects to <a href="${escapeAttr(adminUrl('lander', lander.redirect_target_id))}" target="_blank" rel="noopener">#${lander.redirect_target_id}</a>` : ''}
         · <a href="${escapeAttr(adminUrl('lander', lander.id))}" target="_blank" rel="noopener">Lander ↗</a>
         ${lander.page_view_id ? `· <a href="${escapeAttr(adminUrl('page_view', lander.page_view_id))}" target="_blank" rel="noopener">PageView #${lander.page_view_id} ↗</a>` : '· (no page_view)'}
+        ${linkedBadges(lander) ? `· ${linkedBadges(lander)}` : ''}
       </div>
       <div id="lander-detail-blocks"><span class="muted small">Loading blocks…</span></div>
     `;
