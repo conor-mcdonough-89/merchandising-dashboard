@@ -18,6 +18,7 @@
 (function (global) {
   const TOKENS_KEY = 'merch-google-tokens';
   const BINDING_KEY = 'merch-sheets-binding';
+  const LANDERS_BINDING_KEY = 'merch-landers-sheets-binding';
   const STATE_KEY = 'merch-google-oauth-state';
   const VERIFIER_KEY = 'merch-google-pkce-verifier';
 
@@ -37,17 +38,21 @@
     if (!t) localStorage.removeItem(TOKENS_KEY);
     else localStorage.setItem(TOKENS_KEY, JSON.stringify(t));
   }
-  function loadBinding() {
+  // bindingKey lets a second tool (landers) bind a different sheet without
+  // clobbering the model tool's. Defaults to the model binding for callers
+  // that don't pass one.
+  function loadBinding(bindingKey) {
     try {
-      const raw = localStorage.getItem(BINDING_KEY);
+      const raw = localStorage.getItem(bindingKey || BINDING_KEY);
       return raw ? JSON.parse(raw) : null;
     } catch (_) {
       return null;
     }
   }
-  function saveBinding(b) {
-    if (!b) localStorage.removeItem(BINDING_KEY);
-    else localStorage.setItem(BINDING_KEY, JSON.stringify(b));
+  function saveBinding(b, bindingKey) {
+    const key = bindingKey || BINDING_KEY;
+    if (!b) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(b));
   }
 
   // -------- PKCE helpers --------
@@ -187,11 +192,12 @@
   function disconnect() {
     saveTokens(null);
     saveBinding(null);
+    saveBinding(null, LANDERS_BINDING_KEY);
   }
 
   // -------- Sheets API (proxied) --------
 
-  async function createSheet({ title, headerRow }) {
+  async function createSheet({ title, headerRow, bindingKey }) {
     const access_token = await refreshIfNeeded();
     if (!access_token) throw new Error('Not connected to Google. Connect first.');
     const res = await fetch('/api/google/sheets-create', {
@@ -210,12 +216,12 @@
       gid: typeof data.gid === 'number' ? data.gid : 0,
       title: title || 'SidelineSwap Merch Bulk Import',
       createdAt: new Date().toISOString(),
-    });
+    }, bindingKey);
     return data;
   }
 
-  async function appendRows(rows) {
-    const binding = loadBinding();
+  async function appendRows(rows, bindingKey) {
+    const binding = loadBinding(bindingKey);
     if (!binding) throw new Error('No sheet bound. Click Create Sheet first.');
     if (!Array.isArray(rows) || !rows.length) return { appended: 0 };
     const access_token = await refreshIfNeeded();
@@ -258,8 +264,8 @@
   // /api/google/sheets-meta and persist it. Cell formatting requires this
   // exact gid -- defaulting to 0 fails with "No grid with id: 0" when the
   // worksheet's actual id isn't 0.
-  async function ensureGid() {
-    const binding = loadBinding();
+  async function ensureGid(bindingKey) {
+    const binding = loadBinding(bindingKey);
     if (!binding) throw new Error('No sheet bound.');
     if (typeof binding.gid === 'number') return binding.gid;
     const access_token = await refreshIfNeeded();
@@ -274,7 +280,7 @@
       throw new Error(`Sheets meta ${res.status}: ${text.slice(0, 200)}`);
     }
     const data = await res.json();
-    saveBinding({ ...binding, gid: data.gid });
+    saveBinding({ ...binding, gid: data.gid }, bindingKey);
     return data.gid;
   }
 
@@ -282,32 +288,16 @@
   // stashed on the entry (e.g. "Sheet1!A4:S4"); `columnIndices` are zero-based.
   // Builds spreadsheets.batchUpdate repeatCell requests and POSTs them to the
   // sheets-format Edge Function.
-  async function highlightCells({ range, columnIndices }) {
-    const binding = loadBinding();
+  async function highlightCells({ range, columnIndices, bindingKey }) {
+    const binding = loadBinding(bindingKey);
     if (!binding) throw new Error('No sheet bound.');
     if (!range || !Array.isArray(columnIndices) || !columnIndices.length) return { skipped: true };
     const access_token = await refreshIfNeeded();
     if (!access_token) throw new Error('Not connected to Google.');
     const rowIndex = parseRowIndexFromRange(range);
     if (rowIndex < 0) throw new Error(`Couldn't parse row from range: ${range}`);
-    const gid = await ensureGid();
-    const requests = columnIndices.map((col) => ({
-      repeatCell: {
-        range: {
-          sheetId: gid,
-          startRowIndex: rowIndex,
-          endRowIndex: rowIndex + 1,
-          startColumnIndex: col,
-          endColumnIndex: col + 1,
-        },
-        cell: {
-          userEnteredFormat: {
-            backgroundColor: { red: 1.0, green: 0.95, blue: 0.5, alpha: 1 },
-          },
-        },
-        fields: 'userEnteredFormat.backgroundColor',
-      },
-    }));
+    const gid = await ensureGid(bindingKey);
+    const requests = buildHighlightRequests(gid, rowIndex, rowIndex + 1, columnIndices);
     const res = await fetch('/api/google/sheets-format', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -320,12 +310,69 @@
     return res.json();
   }
 
+  // Yellow-highlight the given columns across every row of a multi-row appended
+  // range (e.g. "Sheet1!A4:P53"). Used by the lander bulk action, which appends
+  // many rows in one call and highlights the changed columns across all of them.
+  async function highlightColumnsInRange({ range, columnIndices, bindingKey }) {
+    const binding = loadBinding(bindingKey);
+    if (!binding) throw new Error('No sheet bound.');
+    if (!range || !Array.isArray(columnIndices) || !columnIndices.length) return { skipped: true };
+    const access_token = await refreshIfNeeded();
+    if (!access_token) throw new Error('Not connected to Google.');
+    const span = parseRowSpanFromRange(range);
+    if (!span) throw new Error(`Couldn't parse row span from range: ${range}`);
+    const gid = await ensureGid(bindingKey);
+    const requests = buildHighlightRequests(gid, span.start, span.end + 1, columnIndices);
+    const res = await fetch('/api/google/sheets-format', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token, sheetId: binding.sheetId, requests }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Sheets format ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  function buildHighlightRequests(gid, startRowIndex, endRowIndex, columnIndices) {
+    return columnIndices.map((col) => ({
+      repeatCell: {
+        range: {
+          sheetId: gid,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: col,
+          endColumnIndex: col + 1,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 1.0, green: 0.95, blue: 0.5, alpha: 1 },
+          },
+        },
+        fields: 'userEnteredFormat.backgroundColor',
+      },
+    }));
+  }
+
   // Parse the zero-based row index from an A1 range like "Sheet1!A4:S4". Picks
   // the digits after the first column letter; returns -1 on failure.
   function parseRowIndexFromRange(range) {
     const m = /[A-Z]+(\d+)/.exec(range || '');
     if (!m) return -1;
     return parseInt(m[1], 10) - 1;
+  }
+
+  // Parse the zero-based inclusive row span from an A1 range like
+  // "Sheet1!A4:P53" -> { start: 3, end: 52 }. Falls back to a single-row span.
+  function parseRowSpanFromRange(range) {
+    const nums = String(range || '').match(/[A-Z]+(\d+)/g);
+    if (!nums || !nums.length) return null;
+    const rows = nums.map((s) => parseInt(/\d+/.exec(s)[0], 10) - 1);
+    const start = Math.min(...rows);
+    const end = Math.max(...rows);
+    if (start < 0) return null;
+    return { start, end };
   }
 
   // Read columns A (model_id) through I (name) from the bound Sheet, skipping
@@ -378,6 +425,8 @@
     appendRows,
     updateRow,
     highlightCells,
+    highlightColumnsInRange,
     readPendingActions,
+    LANDERS_BINDING_KEY,
   };
 })(window);

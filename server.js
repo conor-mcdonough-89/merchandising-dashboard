@@ -200,6 +200,7 @@ const EDGE_ROUTES = [
   { path: '/api/conventions/list',        module: './api/conventions/list.js' },
   { path: '/api/conventions/upsert',      module: './api/conventions/upsert.js' },
   { path: '/api/landers/chat',            module: './api/landers/chat.js' },
+  { path: '/api/landers/action',          module: './api/landers/action.js' },
 ];
 
 const _edgeCache = new Map();

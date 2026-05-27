@@ -17,6 +17,21 @@
   const ALL_LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
   const DEFAULT_SYNC_STATES = ['available'];
 
+  // Engineering's lander bulk-import template — exact column order.
+  const LANDER_BULK_IMPORT_HEADERS = [
+    'id', 'slug', 'redirect_target_id', 'canonical_id', 'type', 'state',
+    'models_category_id', 'page_view_id', 'name', 'title_tag', 'query',
+    'synonyms', 'discoverable', 'show_categories', 'show_categories_no_images',
+    'description',
+  ];
+
+  // Max landers per bulk action. Select-all caps the filtered set at this.
+  const LANDER_SELECTION_CAP = 5000;
+
+  // Separate Google Sheet binding so a Landers sheet never clobbers the model
+  // tool's bound sheet.
+  const LANDERS_BINDING_KEY = (global.Sheets && global.Sheets.LANDERS_BINDING_KEY) || 'merch-landers-sheets-binding';
+
   // ---- SQL ----
 
   // Light projection: omit description + synonyms (heavy fields) so the
@@ -105,6 +120,32 @@ FROM rails.attachable_tiles AS at
 JOIN rails.tiles AS t ON t.id = at.tile_id
 WHERE at.block_id IN (__BLOCK_IDS__)
 ORDER BY at.block_id, at.position ASC
+`.trim();
+
+  // Full template-column projection for a set of selected lander ids. Ids are
+  // integers from our own cache; we coerce + validate to integers before
+  // interpolation (same defense-in-depth as the block predicate — no template
+  // tags). The IN-list is chunked by the caller to stay within SQL limits.
+  const LANDER_TEMPLATE_FIELDS_SQL_TEMPLATE = `
+SELECT
+  l.id,
+  l.slug,
+  l.redirect_target_id,
+  l.canonical_id,
+  l.type,
+  l.state,
+  l.models_category_id,
+  l.page_view_id,
+  l.name,
+  l.title_tag,
+  l.query,
+  l.synonyms,
+  l.discoverable,
+  l.show_categories,
+  l.show_categories_no_images,
+  l.description
+FROM rails.landers AS l
+WHERE l.id IN (__IDS__)
 `.trim();
 
   // ---- SQL builders ----
@@ -292,6 +333,84 @@ ORDER BY at.block_id, at.position ASC
   let _lastChatSpec = null;
   let _allLanders = null;
 
+  // Bulk-action state. `_selectedLanderIds` is the operator's current checkbox
+  // selection; `_landerSheetMap` mirrors the lander_sheet IndexedDB store so
+  // queued rows get an inline diff badge; `_lastFilteredIds` is the full
+  // filtered id list (table display is capped, selection is not).
+  let _selectedLanderIds = new Set();
+  let _landerSheetMap = new Map();
+  let _lastFilteredIds = [];
+
+  function landerToast(msg, kind = '') {
+    const wrap = document.getElementById('toasts');
+    if (!wrap) return;
+    const t = document.createElement('div');
+    t.className = 'toast ' + kind;
+    t.textContent = msg;
+    wrap.appendChild(t);
+    setTimeout(() => { t.remove(); }, 4500);
+  }
+
+  function landerBinding() {
+    return (global.Sheets && Sheets.loadBinding) ? Sheets.loadBinding(LANDERS_BINDING_KEY) : null;
+  }
+
+  async function refreshLanderSheetMap() {
+    try {
+      const entries = await Storage.listLanderSheetEntries();
+      _landerSheetMap = new Map(entries.map((e) => [Number(e.id), e]));
+    } catch (_) {
+      _landerSheetMap = new Map();
+    }
+  }
+
+  function chunk(arr, n) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  }
+
+  function serializeArr(v) {
+    if (Array.isArray(v)) return v.join(';');
+    return v == null ? '' : v;
+  }
+
+  // Fetch every template column for the selected ids, chunking the IN-list.
+  async function fetchLanderTemplateFields(ids) {
+    const valid = ids.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    const map = new Map();
+    for (const part of chunk(valid, 1000)) {
+      const sql = LANDER_TEMPLATE_FIELDS_SQL_TEMPLATE.replace('__IDS__', part.join(','));
+      const rows = await Metabase.runNativeQuery(sql);
+      for (const r of rows) map.set(Number(r.id), r);
+    }
+    return map;
+  }
+
+  // Build the bulk-import row object: every column from the DB record, with the
+  // operator's whitelisted changes (state, discoverable) layered on top.
+  function buildLanderRow(fields, changes) {
+    const row = Object.fromEntries(LANDER_BULK_IMPORT_HEADERS.map((h) => [h, '']));
+    const s = fields || {};
+    for (const h of LANDER_BULK_IMPORT_HEADERS) row[h] = serializeArr(s[h]);
+    if (changes && changes.state != null) row.state = changes.state;
+    if (changes && changes.discoverable != null) row.discoverable = changes.discoverable ? 1 : 0;
+    return row;
+  }
+
+  function buildLanderValues(fields, changes) {
+    const r = buildLanderRow(fields, changes);
+    return LANDER_BULK_IMPORT_HEADERS.map((h) => (r[h] == null ? '' : r[h]));
+  }
+
+  function computeChangedLanderColumns(changes) {
+    const idx = (n) => LANDER_BULK_IMPORT_HEADERS.indexOf(n);
+    const out = [];
+    if (changes && changes.state != null) out.push(idx('state'));
+    if (changes && changes.discoverable != null) out.push(idx('discoverable'));
+    return out.filter((i) => i >= 0);
+  }
+
   function adminUrl(entity, id) {
     if (id == null) return null;
     // Map our internal entity names to admin paths. The user's message had
@@ -339,6 +458,7 @@ ORDER BY at.block_id, at.position ASC
     const main = document.getElementById('main');
     const meta = await Storage.loadLandersMeta();
     _allLanders = await Storage.listLanders();
+    await refreshLanderSheetMap();
 
     main.innerHTML = `
       <div class="landers-tool">
@@ -734,21 +854,31 @@ ORDER BY at.block_id, at.position ASC
     const wrap = document.getElementById('landers-results');
     if (!wrap) return;
     const rows = filterLanders();
+    _lastFilteredIds = rows.map((l) => Number(l.id));
+    // Drop selections that no longer match the current filter set so the count
+    // and the action stay honest.
+    const filteredSet = new Set(_lastFilteredIds);
+    for (const id of Array.from(_selectedLanderIds)) {
+      if (!filteredSet.has(id)) _selectedLanderIds.delete(id);
+    }
     document.getElementById('landers-count').textContent =
       `${rows.length.toLocaleString()} match${rows.length === 1 ? '' : 'es'} of ${_allLanders.length.toLocaleString()} synced`;
 
     const MAX = 500;
     const truncated = rows.length > MAX;
     const display = truncated ? rows.slice(0, MAX) : rows;
+    const allDisplayedSelected = display.length > 0 && display.every((l) => _selectedLanderIds.has(Number(l.id)));
 
     const arrow = (col) => _state.sort.col === col ? (_state.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
     const th = (col, label) => `<th class="sortable" data-col="${col}">${label}${arrow(col)}</th>`;
 
     wrap.innerHTML = `
+      ${renderActionBarHtml(rows.length)}
       ${truncated ? `<p class="muted small" style="margin:6px 0;">Showing first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} — narrow the filters to see more.</p>` : ''}
       <table class="landers-table">
         <thead>
           <tr>
+            <th class="lf-check-col"><input type="checkbox" id="lf-select-all"${allDisplayedSelected ? ' checked' : ''} title="Select all matches (capped at ${LANDER_SELECTION_CAP.toLocaleString()})"></th>
             ${th('id', 'ID')}
             ${th('slug', 'Slug')}
             ${th('name', 'Name')}
@@ -785,10 +915,230 @@ ORDER BY at.block_id, at.position ASC
     wrap.querySelectorAll('tr[data-lander-id]').forEach((tr) => {
       tr.addEventListener('click', (e) => {
         if (e.target.closest('a')) return; // let admin link clicks pass through
+        if (e.target.closest('.lf-row-check')) return; // checkbox handles itself
         const id = Number(tr.getAttribute('data-lander-id'));
         openLanderDetail(id);
       });
     });
+    wrap.querySelectorAll('.lf-row-check').forEach((cb) => {
+      cb.addEventListener('click', (e) => e.stopPropagation());
+      cb.addEventListener('change', (e) => {
+        const id = Number(e.target.getAttribute('data-id'));
+        if (e.target.checked) _selectedLanderIds.add(id);
+        else _selectedLanderIds.delete(id);
+        updateActionBar();
+        const selAll = document.getElementById('lf-select-all');
+        if (selAll) {
+          selAll.checked = display.length > 0 && display.every((l) => _selectedLanderIds.has(Number(l.id)));
+        }
+      });
+    });
+    bindActionBarHandlers();
+  }
+
+  // ---- selection / bulk-action bar ----
+
+  function renderActionBarHtml(matchCount) {
+    const binding = landerBinding();
+    const connected = !!(global.Sheets && Sheets.isConnected && Sheets.isConnected());
+    const queued = _landerSheetMap.size;
+    const sheetStatus = binding
+      ? `Bound: <a href="${escapeAttr(binding.url)}" target="_blank" rel="noopener">${escapeHtml(binding.title || 'Landers sheet')} ↗</a>`
+      : (connected ? 'No landers sheet yet.' : 'Connect Google in Settings to link a sheet.');
+    return `
+      <div class="landers-action-bar">
+        <span id="lf-selected-count" class="small"><strong>${_selectedLanderIds.size.toLocaleString()}</strong> selected${matchCount > LANDER_SELECTION_CAP ? ` · select-all caps at ${LANDER_SELECTION_CAP.toLocaleString()}` : ''}</span>
+        <button class="ghost small" id="lf-select-all-matches">Select all matches</button>
+        <button class="ghost small" id="lf-clear-selection">Clear selection</button>
+        <div class="spacer"></div>
+        <span class="muted small" id="lf-sheet-status">${sheetStatus}</span>
+        <button class="ghost small" id="lf-create-sheet"${connected ? '' : ' disabled'}>${binding ? 'New Landers Sheet' : 'Create Landers Sheet'}</button>
+        <button class="primary small" id="lf-action"${_selectedLanderIds.size ? '' : ' disabled'}>Action…</button>
+        ${queued ? `<button class="ghost small" id="lf-download-csv">Download CSV (${queued.toLocaleString()})</button>` : ''}
+      </div>
+    `;
+  }
+
+  function updateActionBar() {
+    const count = document.getElementById('lf-selected-count');
+    if (count) count.innerHTML = `<strong>${_selectedLanderIds.size.toLocaleString()}</strong> selected${_lastFilteredIds.length > LANDER_SELECTION_CAP ? ` · select-all caps at ${LANDER_SELECTION_CAP.toLocaleString()}` : ''}`;
+    const action = document.getElementById('lf-action');
+    if (action) action.disabled = _selectedLanderIds.size === 0;
+  }
+
+  function bindActionBarHandlers() {
+    const selAll = document.getElementById('lf-select-all');
+    if (selAll) selAll.addEventListener('change', (e) => selectAllMatches(e.target.checked));
+    const selAllBtn = document.getElementById('lf-select-all-matches');
+    if (selAllBtn) selAllBtn.addEventListener('click', () => selectAllMatches(true));
+    const clearBtn = document.getElementById('lf-clear-selection');
+    if (clearBtn) clearBtn.addEventListener('click', () => selectAllMatches(false));
+    const createBtn = document.getElementById('lf-create-sheet');
+    if (createBtn) createBtn.addEventListener('click', createLanderSheet);
+    const actionBtn = document.getElementById('lf-action');
+    if (actionBtn) actionBtn.addEventListener('click', openLanderActionModal);
+    const csvBtn = document.getElementById('lf-download-csv');
+    if (csvBtn) csvBtn.addEventListener('click', downloadLanderCsv);
+  }
+
+  // Select (or clear) the full filtered set, capped. Re-renders so every visible
+  // checkbox reflects the new state.
+  function selectAllMatches(on) {
+    if (!on) {
+      _selectedLanderIds.clear();
+    } else {
+      const capped = _lastFilteredIds.slice(0, LANDER_SELECTION_CAP);
+      _selectedLanderIds = new Set(capped);
+      if (_lastFilteredIds.length > LANDER_SELECTION_CAP) {
+        landerToast(`Capped at ${LANDER_SELECTION_CAP.toLocaleString()} of ${_lastFilteredIds.length.toLocaleString()} matches.`, '');
+      }
+    }
+    renderResults();
+  }
+
+  async function createLanderSheet() {
+    if (!global.Sheets || !Sheets.isConnected()) {
+      return landerToast('Connect Google in Settings first.', 'error');
+    }
+    const title = `SidelineSwap Landers — ${new Date().toISOString().slice(0, 10)}`;
+    const btn = document.getElementById('lf-create-sheet');
+    if (btn) btn.disabled = true;
+    try {
+      const result = await Sheets.createSheet({
+        title,
+        headerRow: LANDER_BULK_IMPORT_HEADERS,
+        bindingKey: LANDERS_BINDING_KEY,
+      });
+      landerToast(`Landers sheet created: ${result.url}`, 'ok');
+    } catch (e) {
+      landerToast('Create failed: ' + e.message, 'error');
+    }
+    renderResults();
+  }
+
+  function closeLanderActionModal() {
+    const m = document.getElementById('lander-action-modal');
+    if (m) m.remove();
+  }
+
+  function openLanderActionModal() {
+    if (!_selectedLanderIds.size) return;
+    closeLanderActionModal();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.id = 'lander-action-modal';
+    backdrop.innerHTML = `
+      <div class="modal" style="max-width: 520px;">
+        <h3>Bulk action on ${_selectedLanderIds.size.toLocaleString()} lander${_selectedLanderIds.size === 1 ? '' : 's'}</h3>
+        <p class="muted small">Describe the change in plain English. Only <strong>state</strong> and <strong>discoverable</strong> can be set. Each lander's full template fields are fetched from the DB; your change is layered on top and highlighted yellow in the bound sheet.</p>
+        <textarea id="lf-action-input" rows="3" placeholder="e.g. set these to removed" style="width:100%;"></textarea>
+        <div id="lf-action-status" class="muted small" style="margin-top:6px;"></div>
+        <div class="modal-actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+          <button class="ghost" id="lf-action-cancel">Cancel</button>
+          <button class="primary" id="lf-action-start">Start</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    const input = document.getElementById('lf-action-input');
+    input.focus();
+    document.getElementById('lf-action-cancel').addEventListener('click', closeLanderActionModal);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeLanderActionModal(); });
+    document.getElementById('lf-action-start').addEventListener('click', () => {
+      runLanderAction((input.value || '').trim());
+    });
+  }
+
+  async function postLanderAction(instruction) {
+    const res = await fetch('/api/landers/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instruction }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  async function runLanderAction(instruction) {
+    if (!instruction) { document.getElementById('lf-action-input').focus(); return; }
+    const ids = Array.from(_selectedLanderIds);
+    if (!ids.length) return;
+    const statusEl = document.getElementById('lf-action-status');
+    const startBtn = document.getElementById('lf-action-start');
+    const setStatus = (msg, err) => {
+      if (!statusEl) return;
+      statusEl.textContent = msg;
+      statusEl.style.color = err ? 'var(--red)' : '';
+    };
+    if (startBtn) startBtn.disabled = true;
+    try {
+      setStatus('Interpreting…');
+      const result = await postLanderAction(instruction);
+      const changes = result.changes || {};
+      if (!Object.keys(changes).length) {
+        setStatus(result.refusal || 'No applicable change.', true);
+        if (startBtn) startBtn.disabled = false;
+        return;
+      }
+      setStatus(`Fetching fields for ${ids.length.toLocaleString()} landers…`);
+      const fieldsMap = await fetchLanderTemplateFields(ids);
+
+      const rows = [];
+      for (const id of ids) {
+        const fields = fieldsMap.get(Number(id));
+        if (!fields) continue;
+        rows.push(buildLanderValues(fields, changes));
+        await Storage.addLanderSheetEntry({ id: Number(id), fields, changes, instruction, explanation: result.explanation || '' });
+      }
+      await refreshLanderSheetMap();
+
+      const binding = landerBinding();
+      if (binding && rows.length) {
+        try {
+          setStatus(`Appending ${rows.length.toLocaleString()} rows to the sheet…`);
+          const appendRes = await Sheets.appendRows(rows, LANDERS_BINDING_KEY);
+          const range = appendRes && appendRes.updates && appendRes.updates.updatedRange;
+          const cols = computeChangedLanderColumns(changes);
+          if (range && cols.length) {
+            await Sheets.highlightColumnsInRange({ range, columnIndices: cols, bindingKey: LANDERS_BINDING_KEY });
+          }
+          landerToast(`Applied to ${rows.length.toLocaleString()} landers and synced to the sheet.`, 'ok');
+        } catch (e) {
+          landerToast(`Saved locally; Sheets sync failed: ${e.message}. Use Download CSV.`, 'error');
+        }
+      } else {
+        landerToast(`Saved ${rows.length.toLocaleString()} landers locally. No sheet bound — use Download CSV.`, '');
+      }
+
+      _selectedLanderIds.clear();
+      closeLanderActionModal();
+      renderResults();
+    } catch (e) {
+      setStatus('Failed: ' + e.message, true);
+      if (startBtn) startBtn.disabled = false;
+    }
+  }
+
+  async function downloadLanderCsv() {
+    let entries;
+    try {
+      entries = await Storage.listLanderSheetEntries();
+    } catch (e) {
+      return landerToast('Could not read queued landers: ' + e.message, 'error');
+    }
+    if (!entries.length) return landerToast('No queued lander changes to export.', '');
+    const data = entries.map((e) => buildLanderValues(e.fields, e.changes));
+    const csv = Papa.unparse({ fields: LANDER_BULK_IMPORT_HEADERS, data });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `landers-update-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   function rowHtml(l) {
@@ -797,16 +1147,24 @@ ORDER BY at.block_id, at.position ASC
     const rdUrl = adminUrl('lander', l.redirect_target_id);
     const stateTag = l.state ? `<span class="state-tag state-${escapeAttr(l.state)}">${escapeHtml(l.state)}</span>` : '';
     const discIcon = l.discoverable ? '✓' : '—';
+    const checked = _selectedLanderIds.has(Number(l.id)) ? ' checked' : '';
+    const queued = _landerSheetMap.get(Number(l.id));
+    const changes = queued && queued.changes ? queued.changes : null;
+    const stateDiff = changes && changes.state != null
+      ? `<span class="lf-diff">→ <strong>${escapeHtml(changes.state)}</strong></span>` : '';
+    const discDiff = changes && changes.discoverable != null
+      ? `<span class="lf-diff">→ <strong>${changes.discoverable ? '✓' : '—'}</strong></span>` : '';
     return `
-      <tr data-lander-id="${l.id}" class="clickable">
+      <tr data-lander-id="${l.id}" class="clickable${queued ? ' lf-queued' : ''}">
+        <td class="lf-check-col"><input type="checkbox" class="lf-row-check" data-id="${l.id}"${checked}></td>
         <td class="num">${l.id}</td>
         <td><code>${escapeHtml(l.slug)}</code></td>
         <td>${escapeHtml(l.name)}</td>
         <td class="muted small">${escapeHtml(l.title_tag)}</td>
         <td>${escapeHtml(l.query)}</td>
         <td>${escapeHtml(l.type)}</td>
-        <td>${stateTag}</td>
-        <td>${discIcon}</td>
+        <td>${stateTag}${stateDiff}</td>
+        <td>${discIcon}${discDiff}</td>
         <td class="num">${(l.available_count || 0).toLocaleString()}</td>
         <td>${l.page_view_id ? `<a href="${escapeAttr(pvUrl)}" target="_blank" rel="noopener">${l.page_view_id}</a>` : '—'}</td>
         <td>${l.redirect_target_id ? `<a href="${escapeAttr(rdUrl)}" target="_blank" rel="noopener">${l.redirect_target_id}</a>` : '—'}</td>

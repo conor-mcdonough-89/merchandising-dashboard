@@ -1,6 +1,7 @@
 // storage.js — IndexedDB persistence for the merch dashboard.
 // Database name: `merch-dashboard`
-// Stores: categories, conventions, decisions, sheet, landers, landers_meta
+// Stores: categories, conventions, decisions, sheet, landers, landers_meta,
+//         lander_sheet, model_versions, model_versions_meta
 // Public API: openDB, saveCategory, loadCategory, listCategories,
 //             deleteCategory,
 //             saveConvention, loadConvention, listConventions,
@@ -18,7 +19,7 @@
 
 (function (global) {
   const DB_NAME = 'merch-dashboard';
-  const DB_VERSION = 4;
+  const DB_VERSION = 5;
   const REJECTION_TTL_DAYS = 30;
 
   let _dbPromise = null;
@@ -71,6 +72,11 @@
         }
         if (!db.objectStoreNames.contains('model_versions_meta')) {
           db.createObjectStore('model_versions_meta', { keyPath: 'key' });
+        }
+        // v4 -> v5: lander bulk-action sheet. One in-progress row per lander id;
+        // read-modify-write so repeated actions on the same lander dedup.
+        if (!db.objectStoreNames.contains('lander_sheet')) {
+          db.createObjectStore('lander_sheet', { keyPath: 'id' });
         }
       };
       // Without this, an older connection in another tab blocks the version
@@ -334,6 +340,33 @@
     return promisify(store.get('singleton'));
   }
 
+  // -------- lander_sheet (in-progress lander bulk import) --------
+  // Read-modify-write so layered actions merge into one record per lander id.
+  // Callers pass only the fields they're setting.
+  async function addLanderSheetEntry(entry) {
+    const store = await tx('lander_sheet', 'readwrite');
+    const existing = await promisify(store.get(entry.id));
+    const merged = {
+      ...(existing || {}),
+      ...entry,
+      addedAt:   (existing && existing.addedAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    return promisify(store.put(merged));
+  }
+  async function removeLanderSheetEntry(id) {
+    const store = await tx('lander_sheet', 'readwrite');
+    return promisify(store.delete(id));
+  }
+  async function listLanderSheetEntries() {
+    const store = await tx('lander_sheet', 'readonly');
+    return promisify(store.getAll());
+  }
+  async function clearLanderSheet() {
+    const store = await tx('lander_sheet', 'readwrite');
+    return promisify(store.clear());
+  }
+
   // -------- model versions (Model Versions tool cache) --------
   // Replaces the whole store on each sync so stale rows from a prior
   // brand/category selection don't linger. Meta is a singleton record holding
@@ -376,6 +409,7 @@
     recordDecision, getRejections, clearExpiredDecisions, clearRejectionsForSourceIds,
     addSheetEntry, loadSheetEntry, removeSheetEntry, listSheetEntries, clearSheet,
     putLanders, listLanders, clearLanders, saveLandersMeta, loadLandersMeta,
+    addLanderSheetEntry, removeLanderSheetEntry, listLanderSheetEntries, clearLanderSheet,
     putModelVersions, listModelVersions, clearModelVersions,
     saveModelVersionsMeta, loadModelVersionsMeta,
   };
