@@ -53,6 +53,7 @@
   // Per-tool state for the imagery tools. Persisted to localStorage so a refresh
   // keeps the last synced view. Shape: { sportId, categoryId?, rows, syncedAt }
   let _imageryState = null;
+  let _imageryImageFilter = 'all'; // 'all' | 'with' | 'without' — image-status pills, mirrors Model Versions
   let _categoryImageryState = null;
   // Model Versions: meta (selection + syncedAt) kept in memory + IndexedDB
   // `model_versions_meta`; the rows themselves live in IndexedDB
@@ -445,7 +446,7 @@
     main.innerHTML = `
       <div class="imagery-tool">
         <h2>Model Imagery</h2>
-        <p class="imagery-subtitle">Find models missing a primary image. Click any row to open the model's images page in admin.</p>
+        <p class="imagery-subtitle">Find models missing a primary image. Click any row to open the model's edit page in admin.</p>
         <div class="imagery-controls">
           <label for="img-sport">Sport</label>
           <select id="img-sport"><option value="">— pick a sport —</option></select>
@@ -521,6 +522,7 @@
       try {
         const rows = await Metabase.fetchImageryModelsForCategory(categoryId);
         _imageryState = { sportId, categoryId, rows, syncedAt: new Date().toISOString() };
+        _imageryImageFilter = 'all';
         localStorage.setItem(IMAGERY_STATE_KEY, JSON.stringify(_imageryState));
         status.textContent = `Synced ${rows.length.toLocaleString()} model(s).`;
         renderImageryResults(_imageryState);
@@ -542,9 +544,15 @@
     }
     const withCount = state.rows.filter((r) => !!r.primary_image_url).length;
     const withoutCount = state.rows.length - withCount;
-    const rowsHtml = state.rows.map((m) => {
+    const imageFilter = _imageryImageFilter;
+    const filtered = state.rows.filter((m) => {
+      if (imageFilter === 'with') return !!m.primary_image_url;
+      if (imageFilter === 'without') return !m.primary_image_url;
+      return true;
+    });
+    const rowsHtml = filtered.map((m) => {
       const has = !!m.primary_image_url;
-      const adminUrl = `https://admin.sidelineswap.com/admin/models/${m.id}/images${has ? '' : '/new'}`;
+      const adminUrl = `https://admin.sidelineswap.com/admin/models/${m.id}/edit`;
       const bubble = has
         ? `<span class="img-bubble has-image">Has Image</span>`
         : `<span class="img-bubble no-image">Missing</span>`;
@@ -561,17 +569,33 @@
         </tr>
       `;
     }).join('');
+    const imgPill = (val, label, count) =>
+      `<span class="sport-pill ${imageFilter === val ? 'active' : ''}" data-img-filter="${val}">${label} <span class="muted small">${count.toLocaleString()}</span></span>`;
+    const tableBody = rowsHtml || `<tr><td colspan="5" class="muted small" style="padding:14px;text-align:center;">No models match this filter.</td></tr>`;
     wrap.innerHTML = `
-      <p class="muted small" style="margin-bottom:10px;">
-        ${state.rows.length.toLocaleString()} model(s) · <strong>${withCount.toLocaleString()}</strong> with image · <strong>${withoutCount.toLocaleString()}</strong> missing · synced ${formatRelative(state.syncedAt)}
-      </p>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        <span class="muted small">
+          ${state.rows.length.toLocaleString()} model(s) · synced ${formatRelative(state.syncedAt)}
+        </span>
+        <span style="display:flex;gap:6px;">
+          ${imgPill('all', 'All', state.rows.length)}
+          ${imgPill('with', 'Has image', withCount)}
+          ${imgPill('without', 'Missing', withoutCount)}
+        </span>
+      </div>
       <table class="imagery-table">
         <thead>
           <tr><th></th><th>Model</th><th>Model Imagery</th><th>Rank</th><th>L90 Sold</th></tr>
         </thead>
-        <tbody>${rowsHtml}</tbody>
+        <tbody>${tableBody}</tbody>
       </table>
     `;
+    wrap.querySelectorAll('[data-img-filter]').forEach((el) => {
+      el.addEventListener('click', () => {
+        _imageryImageFilter = el.getAttribute('data-img-filter');
+        renderImageryResults(state);
+      });
+    });
     wrap.querySelectorAll('tr.clickable').forEach((tr) => {
       tr.addEventListener('click', () => window.open(tr.getAttribute('data-href'), '_blank', 'noopener'));
     });
