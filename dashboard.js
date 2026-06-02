@@ -446,7 +446,7 @@
     main.innerHTML = `
       <div class="imagery-tool">
         <h2>Model Imagery</h2>
-        <p class="imagery-subtitle">Find models missing a primary image. Click any row to open the model's edit page in admin.</p>
+        <p class="imagery-subtitle">Find models missing a primary image. Click any row to open the model's edit page in admin. A 🔵 next to a category means it has ranked models — prioritize those.</p>
         <div class="imagery-controls">
           <label for="img-sport">Sport</label>
           <select id="img-sport"><option value="">— pick a sport —</option></select>
@@ -491,7 +491,12 @@
         .sort((a, b) => (a.fullName || a.name).localeCompare(b.fullName || b.name));
       for (const c of cats) {
         const o = document.createElement('option');
-        o.value = c.id; o.textContent = c.fullName || c.name;
+        o.value = c.id;
+        // 🔵 prefix flags categories that carry ranked models — these are the
+        // ones worth prioritizing for imagery work.
+        const ranked = (c.rankedModelCount || 0) > 0;
+        o.textContent = `${ranked ? '🔵 ' : ''}${c.fullName || c.name}`;
+        if (ranked) o.title = `${c.rankedModelCount.toLocaleString()} ranked model(s)`;
         catSel.appendChild(o);
       }
       catSel.disabled = false;

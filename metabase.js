@@ -41,8 +41,15 @@ SELECT
   c.name,
   c.full_name,
   c.path,
-  CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) AS sport_id
+  CAST(SPLIT(c.path, '/')[OFFSET(0)] AS INT64) AS sport_id,
+  COALESCE(rm.ranked_model_count, 0) AS ranked_model_count
 FROM rails.categories AS c
+LEFT JOIN (
+  SELECT category_id, COUNT(*) AS ranked_model_count
+  FROM rails.models
+  WHERE state = 'available' AND rank_position IS NOT NULL
+  GROUP BY category_id
+) AS rm ON rm.category_id = c.id
 WHERE c.has_models = 1
 ORDER BY c.full_name
 `.trim();
@@ -226,6 +233,7 @@ WHERE m.state IN ('available', 'pending')
       fullName: r.full_name,
       path: r.path,
       sportId: r.sport_id == null ? null : String(r.sport_id),
+      rankedModelCount: r.ranked_model_count || 0,
     }));
   }
 
