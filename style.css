@@ -1319,6 +1319,19 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .landers-filter-row input[type="text"] { min-width: 160px; }
 
+/* Text filter = a contains/does-not-contain mode select fused to its input. */
+.lf-text-filter { display: inline-flex; align-items: center; }
+.lf-text-filter .lf-text-mode {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+  color: var(--muted);
+}
+.lf-text-filter input[type="text"] {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
 .landers-table {
   width: 100%;
   border-collapse: collapse;

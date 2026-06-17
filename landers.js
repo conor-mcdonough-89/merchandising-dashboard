@@ -17,6 +17,15 @@
   const ALL_LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
   const DEFAULT_SYNC_STATES = ['available'];
 
+  // Match modes for the slug/query/name text filters. `value` is what's stored
+  // in `_state.filters[`${key}_mode`]`; `label` is the dropdown text.
+  const TEXT_MODES = [
+    { value: 'contains', label: 'contains' },
+    { value: 'not_contains', label: 'does not contain' },
+    { value: 'starts_with', label: 'starts with' },
+    { value: 'ends_with', label: 'ends with' },
+  ];
+
   // Engineering's lander bulk-import template — exact column order.
   const LANDER_BULK_IMPORT_HEADERS = [
     'id', 'slug', 'redirect_target_id', 'canonical_id', 'type', 'state',
@@ -374,6 +383,8 @@ WHERE l.id IN (__IDS__)
   let _state = {
     filters: {
       slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
+      // Per-text-field match mode: 'contains' | 'not_contains'.
+      slug_mode: 'contains', query_mode: 'contains', name_mode: 'contains',
       available_count: null, // { op, value } or null
       has_page_view: 'any',  // 'any' | 'has' | 'none'
       linked: 'any',         // 'any' | 'cat_removed' | 'model_removed' | 'model_merged' | 'any_flag'
@@ -577,15 +588,30 @@ WHERE l.id IN (__IDS__)
     `;
   }
 
+  // A text filter is a match-mode select paired with its input. `key` is the
+  // filter id ('slug' | 'query' | 'name'), `label` the placeholder noun. Mode
+  // lives at `_state.filters[`${key}_mode`]` and is one of TEXT_MODES.
+  function textFilterHtml(key, label, value, mode) {
+    const m = TEXT_MODES.some((o) => o.value === mode) ? mode : 'contains';
+    const opts = TEXT_MODES.map((o) =>
+      `<option value="${o.value}"${o.value === m ? ' selected' : ''}>${o.label}</option>`).join('');
+    return `
+      <span class="lf-text-filter">
+        <select id="lf-${key}-mode" class="lf-text-mode">${opts}</select>
+        <input type="text" id="lf-${key}" placeholder="${escapeAttr(label)}…" value="${escapeAttr(value)}">
+      </span>
+    `;
+  }
+
   function renderFiltersHtml() {
     const f = _state.filters;
     const b = _state.block;
     return `
       <div class="landers-filters">
         <div class="landers-filter-row">
-          <input type="text" id="lf-slug" placeholder="Slug contains…" value="${escapeAttr(f.slug)}">
-          <input type="text" id="lf-query" placeholder="Query contains…" value="${escapeAttr(f.query)}">
-          <input type="text" id="lf-name" placeholder="Name contains…" value="${escapeAttr(f.name)}">
+          ${textFilterHtml('slug', 'Slug', f.slug, f.slug_mode)}
+          ${textFilterHtml('query', 'Query', f.query, f.query_mode)}
+          ${textFilterHtml('name', 'Name', f.name, f.name_mode)}
           <select id="lf-type">
             <option value="all">All types</option>
           </select>
@@ -654,6 +680,13 @@ WHERE l.id IN (__IDS__)
         debouncedRender();
       });
     });
+    ['lf-slug-mode', 'lf-query-mode', 'lf-name-mode'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', (e) => {
+        const key = id.replace('lf-', '').replace('-mode', '') + '_mode';
+        _state.filters[key] = e.target.value;
+        persistAndRender();
+      });
+    });
     ['lf-type', 'lf-state', 'lf-discoverable', 'lf-linked'].forEach((id) => {
       document.getElementById(id).addEventListener('change', (e) => {
         const key = id.replace('lf-', '');
@@ -678,6 +711,7 @@ WHERE l.id IN (__IDS__)
     document.getElementById('lf-clear').addEventListener('click', () => {
       _state.filters = {
         slug: '', query: '', name: '', type: 'all', state: 'all', discoverable: 'all',
+        slug_mode: 'contains', query_mode: 'contains', name_mode: 'contains',
         available_count: null, has_page_view: 'any', linked: 'any',
       };
       _state.block = { enabled: false, column: 'layout', op: 'equals', value: '', tile_count: null };
@@ -761,9 +795,18 @@ WHERE l.id IN (__IDS__)
   function summarizeSpec(spec) {
     const parts = [];
     const f = spec.filters || {};
-    if (f.slug_contains) parts.push(`slug contains "${f.slug_contains}"`);
-    if (f.query_contains) parts.push(`query contains "${f.query_contains}"`);
-    if (f.name_contains) parts.push(`name contains "${f.name_contains}"`);
+    const TEXT_OPS = [
+      { suffix: 'contains', verb: 'contains' },
+      { suffix: 'not_contains', verb: 'does not contain' },
+      { suffix: 'starts_with', verb: 'starts with' },
+      { suffix: 'ends_with', verb: 'ends with' },
+    ];
+    for (const field of ['slug', 'query', 'name']) {
+      for (const { suffix, verb } of TEXT_OPS) {
+        const val = f[`${field}_${suffix}`];
+        if (val) parts.push(`${field} ${verb} "${val}"`);
+      }
+    }
     if (f.type) parts.push(`type=${f.type}`);
     if (f.state) parts.push(`state=${f.state}`);
     if (f.discoverable === true) parts.push('discoverable');
@@ -794,9 +837,25 @@ WHERE l.id IN (__IDS__)
   // server-side queries the spec implies (block filter, has-block).
   async function applyChatSpec(spec) {
     const f = spec.filters || {};
-    _state.filters.slug = f.slug_contains || '';
-    _state.filters.query = f.query_contains || '';
-    _state.filters.name = f.name_contains || '';
+    // Each text field is single-mode in the UI, but the spec can carry several
+    // operators. Pick the first present in this precedence order.
+    const SPEC_MODES = [
+      { suffix: 'not_contains', mode: 'not_contains' },
+      { suffix: 'starts_with', mode: 'starts_with' },
+      { suffix: 'ends_with', mode: 'ends_with' },
+      { suffix: 'contains', mode: 'contains' },
+    ];
+    const applyText = (key) => {
+      for (const { suffix, mode } of SPEC_MODES) {
+        const val = f[`${key}_${suffix}`];
+        if (val) { _state.filters[key] = val; _state.filters[`${key}_mode`] = mode; return; }
+      }
+      _state.filters[key] = '';
+      _state.filters[`${key}_mode`] = 'contains';
+    };
+    applyText('slug');
+    applyText('query');
+    applyText('name');
     _state.filters.type = f.type || 'all';
     _state.filters.state = f.state || 'all';
     if (f.discoverable === true) _state.filters.discoverable = '1';
@@ -854,6 +913,9 @@ WHERE l.id IN (__IDS__)
     set('lf-slug', _state.filters.slug);
     set('lf-query', _state.filters.query);
     set('lf-name', _state.filters.name);
+    set('lf-slug-mode', _state.filters.slug_mode || 'contains');
+    set('lf-query-mode', _state.filters.query_mode || 'contains');
+    set('lf-name-mode', _state.filters.name_mode || 'contains');
     set('lf-type', _state.filters.type);
     set('lf-state', _state.filters.state);
     set('lf-discoverable', _state.filters.discoverable);
@@ -891,6 +953,19 @@ WHERE l.id IN (__IDS__)
     }
   }
 
+  // True when `value` satisfies `mode` against `needle`. An empty needle never
+  // constrains. `mode` is one of TEXT_MODES (defaults to contains).
+  function textMatches(value, needle, mode) {
+    if (!needle) return true;
+    const v = (value || '').toLowerCase();
+    switch (mode) {
+      case 'not_contains': return !v.includes(needle);
+      case 'starts_with': return v.startsWith(needle);
+      case 'ends_with': return v.endsWith(needle);
+      default: return v.includes(needle);
+    }
+  }
+
   function filterLanders() {
     const f = _state.filters;
     const slug = f.slug.trim().toLowerCase();
@@ -898,9 +973,9 @@ WHERE l.id IN (__IDS__)
     const name = f.name.trim().toLowerCase();
     const out = [];
     for (const l of _allLanders) {
-      if (slug && !(l.slug || '').toLowerCase().includes(slug)) continue;
-      if (query && !(l.query || '').toLowerCase().includes(query)) continue;
-      if (name && !(l.name || '').toLowerCase().includes(name)) continue;
+      if (!textMatches(l.slug, slug, f.slug_mode)) continue;
+      if (!textMatches(l.query, query, f.query_mode)) continue;
+      if (!textMatches(l.name, name, f.name_mode)) continue;
       if (f.type !== 'all' && l.type !== f.type) continue;
       if (f.state !== 'all' && l.state !== f.state) continue;
       if (f.discoverable !== 'all' && String(l.discoverable) !== f.discoverable) continue;
