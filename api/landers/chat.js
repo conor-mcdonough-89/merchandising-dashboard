@@ -21,7 +21,7 @@ The lander data model:
 - A lander may have an attached page_view, which holds a list of blocks (page_view_blocks). Each block has: layout, data_type, name, title, destination. A block may have attached tiles via attachable_tiles (the "tile_count" predicate counts these).
 
 Allowed operators:
-- String filters (slug, name, query, title_tag) are "contains" (case-insensitive substring). Each also has a negated form "<field>_not_contains" for "does not contain" / exclusion ("no X in the slug", "excluding apparel", "without 'brand' in the query").
+- String filters (slug, name, query, title_tag) are "contains" (case-insensitive substring). Each field also supports "<field>_not_contains" (does not contain / exclusion: "no X in the slug", "excluding apparel"), "<field>_starts_with" (begins with / prefix: "slug starts with golf-"), and "<field>_ends_with" (ends with / suffix: "slug ending in -bats").
 - Block column filters use op = "equals" | "contains" over one of: ${BLOCK_COLUMNS.join(', ')}.
 - Numeric op for available_count and tile_count: one of ${NUM_OPS.join(', ')}. If "between", value must be [lo, hi].
 - has_page_view and has_block are tri-state: "has" | "none" | "any". "any" means no constraint.
@@ -32,10 +32,16 @@ Return JSON only matching this exact shape (use null for any unset field):
   "filters": {
     "slug_contains": <string|null>,
     "slug_not_contains": <string|null>,
+    "slug_starts_with": <string|null>,
+    "slug_ends_with": <string|null>,
     "query_contains": <string|null>,
     "query_not_contains": <string|null>,
+    "query_starts_with": <string|null>,
+    "query_ends_with": <string|null>,
     "name_contains": <string|null>,
     "name_not_contains": <string|null>,
+    "name_starts_with": <string|null>,
+    "name_ends_with": <string|null>,
     "type": <string|null>,
     "state": <"available"|"redirect"|"removed"|"draft"|null>,
     "discoverable": <true|false|null>,
@@ -130,7 +136,12 @@ Exclusions / negation. "no X in the slug", "slug without X", "excluding X", "not
 - "category landers with no apparel in the slug" → filters.query_contains="category", filters.slug_not_contains="apparel".
 - "model landers excluding 'used' in the slug" → filters.query_contains="model", filters.slug_not_contains="used".
 - "landers whose name does not contain clearance" → filters.name_not_contains="clearance".
-A field can carry BOTH a contains and a not_contains when the operator narrows then excludes ("golf landers without apparel in the slug" → filters.slug_contains="golf", filters.slug_not_contains="apparel").`;
+A field can carry BOTH a contains and a not_contains when the operator narrows then excludes ("golf landers without apparel in the slug" → filters.slug_contains="golf", filters.slug_not_contains="apparel").
+
+Prefix / suffix. "starts with", "begins with", "prefixed by" → "<field>_starts_with"; "ends with", "ending in", "suffixed by" → "<field>_ends_with":
+- "landers whose slug starts with golf-" → filters.slug_starts_with="golf-".
+- "slugs ending in -bats" → filters.slug_ends_with="-bats".
+- "model landers whose name ends with Composite" → filters.query_contains="model", filters.name_ends_with="Composite".`;
 
 function clamp(value, allowed) {
   return allowed.includes(value) ? value : null;
@@ -151,16 +162,13 @@ function sanitizeNumPred(p) {
   return { op, value: v };
 }
 
+const TEXT_FIELDS = ['slug', 'query', 'name'];
+const TEXT_OP_SUFFIXES = ['contains', 'not_contains', 'starts_with', 'ends_with'];
+
 function sanitize(parsed) {
   const f = (parsed && parsed.filters) || {};
   const b = (parsed && parsed.block) || {};
   const filters = {
-    slug_contains: typeof f.slug_contains === 'string' ? f.slug_contains.slice(0, 100) : null,
-    slug_not_contains: typeof f.slug_not_contains === 'string' ? f.slug_not_contains.slice(0, 100) : null,
-    query_contains: typeof f.query_contains === 'string' ? f.query_contains.slice(0, 100) : null,
-    query_not_contains: typeof f.query_not_contains === 'string' ? f.query_not_contains.slice(0, 100) : null,
-    name_contains: typeof f.name_contains === 'string' ? f.name_contains.slice(0, 100) : null,
-    name_not_contains: typeof f.name_not_contains === 'string' ? f.name_not_contains.slice(0, 100) : null,
     type: typeof f.type === 'string' ? f.type.slice(0, 50) : null,
     state: clamp(f.state, LANDER_STATES),
     discoverable: f.discoverable === true || f.discoverable === false ? f.discoverable : null,
@@ -168,6 +176,13 @@ function sanitize(parsed) {
     has_page_view: clamp(f.has_page_view, ['has', 'none']),
     linked: clamp(f.linked, ['cat_removed', 'model_removed', 'model_merged', 'any_flag']),
   };
+  // Text-field operators: <field>_{contains,not_contains,starts_with,ends_with}.
+  for (const field of TEXT_FIELDS) {
+    for (const suffix of TEXT_OP_SUFFIXES) {
+      const k = `${field}_${suffix}`;
+      filters[k] = typeof f[k] === 'string' ? f[k].slice(0, 100) : null;
+    }
+  }
   const block = {
     enabled: !!b.enabled,
     column: clamp(b.column, BLOCK_COLUMNS),

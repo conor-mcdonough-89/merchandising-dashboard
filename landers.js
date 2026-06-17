@@ -17,6 +17,15 @@
   const ALL_LANDER_STATES = ['available', 'redirect', 'removed', 'draft'];
   const DEFAULT_SYNC_STATES = ['available'];
 
+  // Match modes for the slug/query/name text filters. `value` is what's stored
+  // in `_state.filters[`${key}_mode`]`; `label` is the dropdown text.
+  const TEXT_MODES = [
+    { value: 'contains', label: 'contains' },
+    { value: 'not_contains', label: 'does not contain' },
+    { value: 'starts_with', label: 'starts with' },
+    { value: 'ends_with', label: 'ends with' },
+  ];
+
   // Engineering's lander bulk-import template — exact column order.
   const LANDER_BULK_IMPORT_HEADERS = [
     'id', 'slug', 'redirect_target_id', 'canonical_id', 'type', 'state',
@@ -579,16 +588,16 @@ WHERE l.id IN (__IDS__)
     `;
   }
 
-  // A text filter is a contains/does-not-contain mode select paired with its
-  // input. `key` is the filter id ('slug' | 'query' | 'name'), `label` the
-  // placeholder noun. Mode lives at `_state.filters[`${key}_mode`]`.
+  // A text filter is a match-mode select paired with its input. `key` is the
+  // filter id ('slug' | 'query' | 'name'), `label` the placeholder noun. Mode
+  // lives at `_state.filters[`${key}_mode`]` and is one of TEXT_MODES.
   function textFilterHtml(key, label, value, mode) {
+    const m = TEXT_MODES.some((o) => o.value === mode) ? mode : 'contains';
+    const opts = TEXT_MODES.map((o) =>
+      `<option value="${o.value}"${o.value === m ? ' selected' : ''}>${o.label}</option>`).join('');
     return `
       <span class="lf-text-filter">
-        <select id="lf-${key}-mode" class="lf-text-mode">
-          <option value="contains"${mode === 'not_contains' ? '' : ' selected'}>contains</option>
-          <option value="not_contains"${mode === 'not_contains' ? ' selected' : ''}>does not contain</option>
-        </select>
+        <select id="lf-${key}-mode" class="lf-text-mode">${opts}</select>
         <input type="text" id="lf-${key}" placeholder="${escapeAttr(label)}…" value="${escapeAttr(value)}">
       </span>
     `;
@@ -786,12 +795,18 @@ WHERE l.id IN (__IDS__)
   function summarizeSpec(spec) {
     const parts = [];
     const f = spec.filters || {};
-    if (f.slug_contains) parts.push(`slug contains "${f.slug_contains}"`);
-    if (f.slug_not_contains) parts.push(`slug does not contain "${f.slug_not_contains}"`);
-    if (f.query_contains) parts.push(`query contains "${f.query_contains}"`);
-    if (f.query_not_contains) parts.push(`query does not contain "${f.query_not_contains}"`);
-    if (f.name_contains) parts.push(`name contains "${f.name_contains}"`);
-    if (f.name_not_contains) parts.push(`name does not contain "${f.name_not_contains}"`);
+    const TEXT_OPS = [
+      { suffix: 'contains', verb: 'contains' },
+      { suffix: 'not_contains', verb: 'does not contain' },
+      { suffix: 'starts_with', verb: 'starts with' },
+      { suffix: 'ends_with', verb: 'ends with' },
+    ];
+    for (const field of ['slug', 'query', 'name']) {
+      for (const { suffix, verb } of TEXT_OPS) {
+        const val = f[`${field}_${suffix}`];
+        if (val) parts.push(`${field} ${verb} "${val}"`);
+      }
+    }
     if (f.type) parts.push(`type=${f.type}`);
     if (f.state) parts.push(`state=${f.state}`);
     if (f.discoverable === true) parts.push('discoverable');
@@ -822,20 +837,25 @@ WHERE l.id IN (__IDS__)
   // server-side queries the spec implies (block filter, has-block).
   async function applyChatSpec(spec) {
     const f = spec.filters || {};
-    // Each text field is single-mode in the UI: a "not contains" value takes
-    // precedence over a "contains" value for the same field if both appear.
-    const applyText = (key, contains, notContains) => {
-      if (notContains) {
-        _state.filters[key] = notContains;
-        _state.filters[`${key}_mode`] = 'not_contains';
-      } else {
-        _state.filters[key] = contains || '';
-        _state.filters[`${key}_mode`] = 'contains';
+    // Each text field is single-mode in the UI, but the spec can carry several
+    // operators. Pick the first present in this precedence order.
+    const SPEC_MODES = [
+      { suffix: 'not_contains', mode: 'not_contains' },
+      { suffix: 'starts_with', mode: 'starts_with' },
+      { suffix: 'ends_with', mode: 'ends_with' },
+      { suffix: 'contains', mode: 'contains' },
+    ];
+    const applyText = (key) => {
+      for (const { suffix, mode } of SPEC_MODES) {
+        const val = f[`${key}_${suffix}`];
+        if (val) { _state.filters[key] = val; _state.filters[`${key}_mode`] = mode; return; }
       }
+      _state.filters[key] = '';
+      _state.filters[`${key}_mode`] = 'contains';
     };
-    applyText('slug', f.slug_contains, f.slug_not_contains);
-    applyText('query', f.query_contains, f.query_not_contains);
-    applyText('name', f.name_contains, f.name_not_contains);
+    applyText('slug');
+    applyText('query');
+    applyText('name');
     _state.filters.type = f.type || 'all';
     _state.filters.state = f.state || 'all';
     if (f.discoverable === true) _state.filters.discoverable = '1';
@@ -933,12 +953,17 @@ WHERE l.id IN (__IDS__)
     }
   }
 
-  // True when `value` satisfies the contains/does-not-contain `mode` against
-  // `needle`. An empty needle never constrains.
+  // True when `value` satisfies `mode` against `needle`. An empty needle never
+  // constrains. `mode` is one of TEXT_MODES (defaults to contains).
   function textMatches(value, needle, mode) {
     if (!needle) return true;
-    const has = (value || '').toLowerCase().includes(needle);
-    return mode === 'not_contains' ? !has : has;
+    const v = (value || '').toLowerCase();
+    switch (mode) {
+      case 'not_contains': return !v.includes(needle);
+      case 'starts_with': return v.startsWith(needle);
+      case 'ends_with': return v.endsWith(needle);
+      default: return v.includes(needle);
+    }
   }
 
   function filterLanders() {
