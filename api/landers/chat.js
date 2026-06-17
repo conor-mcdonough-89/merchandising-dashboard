@@ -21,7 +21,7 @@ The lander data model:
 - A lander may have an attached page_view, which holds a list of blocks (page_view_blocks). Each block has: layout, data_type, name, title, destination. A block may have attached tiles via attachable_tiles (the "tile_count" predicate counts these).
 
 Allowed operators:
-- String filters (slug, name, query, title_tag) are "contains" (case-insensitive substring).
+- String filters (slug, name, query, title_tag) are "contains" (case-insensitive substring). Each also has a negated form "<field>_not_contains" for "does not contain" / exclusion ("no X in the slug", "excluding apparel", "without 'brand' in the query").
 - Block column filters use op = "equals" | "contains" over one of: ${BLOCK_COLUMNS.join(', ')}.
 - Numeric op for available_count and tile_count: one of ${NUM_OPS.join(', ')}. If "between", value must be [lo, hi].
 - has_page_view and has_block are tri-state: "has" | "none" | "any". "any" means no constraint.
@@ -31,8 +31,11 @@ Return JSON only matching this exact shape (use null for any unset field):
 {
   "filters": {
     "slug_contains": <string|null>,
+    "slug_not_contains": <string|null>,
     "query_contains": <string|null>,
+    "query_not_contains": <string|null>,
     "name_contains": <string|null>,
+    "name_not_contains": <string|null>,
     "type": <string|null>,
     "state": <"available"|"redirect"|"removed"|"draft"|null>,
     "discoverable": <true|false|null>,
@@ -121,7 +124,13 @@ Examples:
 - "Bauer hockey stick landers redirecting somewhere" → filters.slug_contains="bauer-hockey", filters.state="redirect".
 - "Find me golf model landers where the linked model is removed" → filters.slug_contains="golf", filters.query_contains="model", filters.linked="model_removed".
 - "lacrosse landers whose linked category was removed" → filters.slug_contains="lacrosse", filters.linked="cat_removed".
-- "landers pointing at a merged model" → filters.linked="model_merged".`;
+- "landers pointing at a merged model" → filters.linked="model_merged".
+
+Exclusions / negation. "no X in the slug", "slug without X", "excluding X", "not X" map to the "_not_contains" form of the relevant field:
+- "category landers with no apparel in the slug" → filters.query_contains="category", filters.slug_not_contains="apparel".
+- "model landers excluding 'used' in the slug" → filters.query_contains="model", filters.slug_not_contains="used".
+- "landers whose name does not contain clearance" → filters.name_not_contains="clearance".
+A field can carry BOTH a contains and a not_contains when the operator narrows then excludes ("golf landers without apparel in the slug" → filters.slug_contains="golf", filters.slug_not_contains="apparel").`;
 
 function clamp(value, allowed) {
   return allowed.includes(value) ? value : null;
@@ -147,8 +156,11 @@ function sanitize(parsed) {
   const b = (parsed && parsed.block) || {};
   const filters = {
     slug_contains: typeof f.slug_contains === 'string' ? f.slug_contains.slice(0, 100) : null,
+    slug_not_contains: typeof f.slug_not_contains === 'string' ? f.slug_not_contains.slice(0, 100) : null,
     query_contains: typeof f.query_contains === 'string' ? f.query_contains.slice(0, 100) : null,
+    query_not_contains: typeof f.query_not_contains === 'string' ? f.query_not_contains.slice(0, 100) : null,
     name_contains: typeof f.name_contains === 'string' ? f.name_contains.slice(0, 100) : null,
+    name_not_contains: typeof f.name_not_contains === 'string' ? f.name_not_contains.slice(0, 100) : null,
     type: typeof f.type === 'string' ? f.type.slice(0, 50) : null,
     state: clamp(f.state, LANDER_STATES),
     discoverable: f.discoverable === true || f.discoverable === false ? f.discoverable : null,
